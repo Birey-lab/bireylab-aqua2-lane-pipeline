@@ -1,0 +1,29 @@
+# binaries and big files - never commit these
+*.exe
+*.dll
+*.mat
+*.tif
+*.tiff
+*.lif
+
+# data outputs that should never go in git
+RESULTS/
+RESULTS_*/
+PreCFU_*/
+*_POST/
+*_lanes/
+*_v1/
+
+# spreadsheets and CSVs in general, but ALLOW templates under config/
+*.xlsx
+*.csv
+!config/*.csv
+
+# R artifacts
+*.RData
+*.rds
+.Rhistory
+
+# OS junk
+.DS_Store
+Thumbs.db

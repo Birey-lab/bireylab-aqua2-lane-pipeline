@@ -1,0 +1,10 @@
+parameter,value,notes
+maxSize,50000,"Active-region size cap (px). 50000 is the lab default for cross-comparability. Lower (e.g. 2000) if hyperactive files hang. Higher (inf) only if you accept potential hang risk on dense recordings."
+minSize,20,"Minimum active-region size (px). Default 20 is appropriate for most calcium imaging."
+thrARScl,2,"Threshold for active-region scaling. Default 2 (AQuA2 standard)."
+minDur,3,"Minimum event duration in frames. Default 3 (AQuA2 standard)."
+sourceSensitivity,9,"Source-detection sensitivity. Default 9 (AQuA2 standard)."
+detectGlo,1,"Detect global signal (1=on, 0=off). Turn off only if you hit 'Index exceeds array elements' on short/sparse recordings (Case 3 lesson)."
+gloDur,20,"Global signal window duration in frames. Default 20."
+frameRate,0.05,"Seconds per frame. Set to 1/Hz for your acquisition. Examples: 20 Hz -> 0.05; 10 Hz -> 0.1; 1.55 Hz -> 0.645"
+spatialRes,1.3,"Micrometers per pixel. Microscope/objective dependent. Examples: 20x typical -> 1.3; 10x typical -> 2.6"
