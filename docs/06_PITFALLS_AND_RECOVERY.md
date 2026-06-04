@@ -34,9 +34,11 @@ $cmd = "matlab -batch ""my_function('arg1', 'arg2')"" > $log 2>&1"
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -WindowStyle Hidden
 ```
 
-The `cmd /c` wrapper handles quote-escaping correctly. **All MATLAB-from-PowerShell invocations in this pipeline use this pattern.**
+The `cmd /c` wrapper handles quote-escaping correctly.
 
-For the compiled `.exe` workers (`aqua_lane.exe`, `cfu_lane.exe`), this issue doesn't apply — they take arguments cleanly. But if you ever go back to raw `matlab -batch` for any reason, remember the `cmd /c` wrap.
+**Important scope:** this bug **specifically affects `matlab -batch`**, not arbitrary executables. The compiled `aqua_lane.exe` and `cfu_lane.exe` workers take their arguments cleanly — `Start-Process -WindowStyle Hidden -ArgumentList @("\"$pin\"", "\"$pout\"")` works fine for them. That's how the real `Launch-Lanes-Exe.ps1` and `Launch-CFU-Lanes.ps1` in this repo invoke the workers.
+
+If you ever go back to raw `matlab -batch` (e.g., for a debugging session before compilation), remember the `cmd /c` wrap. For compiled exes, no wrapping needed.
 
 ---
 
@@ -109,18 +111,27 @@ If `is_real_cell_array` is TRUE, you got the right orientation. If FALSE, swap a
 
 ---
 
-## 7. The CFU launcher hardcodes its log path
+## 7. The CFU launcher's default log path is the same every run
 
 **Symptom:** running a new CFU batch overwrites logs from a previous batch. Lane logs `_logs\cfu_lane01.log` through `_logs\cfu_laneNN.log` no longer reflect what you think they do.
 
-**Cause:** `Launch-CFU-Lanes.ps1` writes logs to `C:\Users\Administrator\Documents\CFU_lanes\_logs\` regardless of the `-LaneRoot` parameter. Sequential runs overwrite the earlier batch's logs at the same lane numbers.
+**Cause:** `Launch-CFU-Lanes.ps1` has a `-LogDir` parameter, but its **default value** is `C:\Users\Administrator\Documents\CFU_lanes\_logs\` regardless of the `-LaneRoot` you pass. If you don't override `-LogDir`, sequential runs overwrite the earlier batch's logs at the same lane numbers.
 
-**Fix:** before each new CFU batch, rename the previous logs to preserve them:
+**Fix (either):**
+
+*Option A — pass `-LogDir` explicitly each run:*
+```powershell
+.\Launch-CFU-Lanes.ps1 -LaneRoot ... -Post ... -LogDir "...\CFU_lanes\_logs_<dataset-name>"
+```
+
+*Option B — rename old logs before launching a new batch:*
 ```powershell
 Rename-Item C:\Users\Administrator\Documents\CFU_lanes\_logs C:\Users\Administrator\Documents\CFU_lanes\_logs_<previous-dataset>
 ```
 
-**Proper fix (for someone willing to patch the script):** modify `Launch-CFU-Lanes.ps1` to write logs under `$LaneRoot\_logs\` instead of the hardcoded path. Two-line change. PRs welcome.
+The Option A pattern is cleaner if you remember it. Option B is a safety net if you don't.
+
+**Possible script improvement (PR welcome):** make the default `$LogDir` derive from `$LaneRoot` (e.g., `$LaneRoot\_logs`) so each new CFU batch writes to a fresh log location automatically. Two-line change.
 
 ---
 

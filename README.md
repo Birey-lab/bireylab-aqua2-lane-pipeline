@@ -31,11 +31,13 @@ The pipeline takes raw multi-frame TIFFs (calcium fluorescence movies), splits t
 
 | Path | What's in it |
 |---|---|
-| `docs/` | All conceptual/procedural documentation |
-| `docs/case-studies/` | Three worked examples from actual lab runs |
-| `powershell/` | Lane orchestration scripts (`.ps1`) |
-| `matlab/` | MATLAB source for the compiled workers (`.m`) |
-| `config/` | Parameter file templates |
+| `docs/` | Conceptual/procedural documentation (7 numbered files + template) |
+| `docs/case-studies/` | Three worked examples, each in its own folder with the case-study `README.md` plus `scripts/` (the actual code that ran for that dataset) |
+| `powershell/` | Generic lane-orchestration scripts (`.ps1`) — the real ones used in production |
+| `matlab/` | Real MATLAB source for the compiled workers (`.m`) |
+| `fiji-macros/` | Fiji/ImageJ macros for TIFF preprocessing (`.ijm`) |
+| `r/` | Canonical R analysis script (latest version). Earlier versions in S3 archive |
+| `config/` | Parameter file template |
 
 ---
 

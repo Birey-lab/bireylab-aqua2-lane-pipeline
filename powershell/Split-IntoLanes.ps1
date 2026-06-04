@@ -1,103 +1,83 @@
 <#
 .SYNOPSIS
-  Split a folder of TIFFs into N size-balanced "lane" subfolders for parallel processing.
+  Split the top-level TIFFs of a flat folder into K size-balanced lane folders for parallel AQuA2.
 
 .DESCRIPTION
-  Greedy bin-packing by file size: sorts TIFFs largest-first, then places each
-  into the currently-smallest lane folder. Result is N lanes with roughly equal
-  total bytes (not necessarily equal file count, since file sizes vary).
+  Scans -Source (TOP LEVEL only, so existing subfolders like Donors2and3 are ignored), then
+  distributes the files across K lanes (lane01..laneK) using greedy bin-packing by file size,
+  so every lane gets roughly equal total GB -> roughly equal wall-clock.
 
-  Without -Execute, performs a dry run showing what WOULD happen.
-  With    -Execute, actually moves files.
-
-.PARAMETER Source
-  Folder containing TIFF files (non-recursive — files must be directly inside).
-
-.PARAMETER LaneRoot
-  Destination folder; will contain lane01/, lane02/, ..., laneNN/ subfolders.
-
-.PARAMETER Lanes
-  Number of lanes to create. Typical values: 8, 16, 24, 32.
-
-.PARAMETER Execute
-  Without this flag, the script prints a plan but moves nothing.
-  With this flag, files are moved.
+  DRY RUN by default. Add -Execute to actually move. MOVE on the same NTFS drive is instant and
+  needs no extra space (use -Copy to copy instead). Re-run safe.
 
 .EXAMPLE
-  # Dry run
-  .\Split-IntoLanes.ps1 -Source C:\data\my_tiffs -LaneRoot C:\data\my_lanes -Lanes 32
-
-  # Actually move them
-  .\Split-IntoLanes.ps1 -Source C:\data\my_tiffs -LaneRoot C:\data\my_lanes -Lanes 32 -Execute
+  powershell -ExecutionPolicy Bypass -File .\Split-IntoLanes.ps1 -Lanes 18
+  powershell -ExecutionPolicy Bypass -File .\Split-IntoLanes.ps1 -Lanes 18 -Execute
 #>
+
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory)] [string]$Source,
-  [Parameter(Mandatory)] [string]$LaneRoot,
-  [Parameter(Mandatory)] [int]$Lanes,
-  [switch]$Execute
+    [string]$Source   = "C:\Users\Administrator\Documents\hCO_AllTIFFs",
+    [string]$LaneRoot = "C:\Users\Administrator\Documents\hCO_lanes",
+    [Parameter(Mandatory=$true)][int]$Lanes,
+    [switch]$Copy,
+    [switch]$Execute
 )
 
-if (-not (Test-Path $Source)) {
-  Write-Error "Source folder not found: $Source"
-  exit 1
-}
-if ($Lanes -lt 1) {
-  Write-Error "Lanes must be >= 1"
-  exit 1
-}
+$ErrorActionPreference = 'Stop'
+if (-not (Test-Path -LiteralPath $Source)) { Write-Error "Source not found: $Source"; return }
+if ($Lanes -lt 1) { Write-Error "Lanes must be >= 1"; return }
 
-$tiffs = Get-ChildItem $Source -Filter *.tif -File | Sort-Object Length -Descending
-if ($tiffs.Count -eq 0) {
-  Write-Error "No .tif files found in $Source"
-  exit 1
-}
+$verb = if ($Copy) { 'COPY' } else { 'MOVE' }
+$mode = if ($Execute) { "EXECUTE ($verb)" } else { "DRY RUN" }
+Write-Host "`n==================================================================="
+Write-Host " Split into $Lanes lanes   Source: $Source"
+Write-Host " Lane root: $LaneRoot    Mode: $mode"
+Write-Host "===================================================================`n"
 
-Write-Host ("Found {0} TIFFs ({1:N1} GB total)" -f `
-  $tiffs.Count, (($tiffs | Measure-Object Length -Sum).Sum / 1GB))
+# Top-level TIFFs only
+$files = Get-ChildItem -LiteralPath $Source -File |
+         Where-Object { $_.Extension -ieq '.tif' -or $_.Extension -ieq '.tiff' } |
+         Sort-Object Length -Descending     # largest first for good greedy balance
+if (-not $files) { Write-Warning "No top-level .tif/.tiff in $Source"; return }
 
-# Initialize N empty lanes
-$laneSizes = @{}
-$laneFiles = @{}
-for ($i = 1; $i -le $Lanes; $i++) {
-  $name = "lane{0:D2}" -f $i
-  $laneSizes[$name] = 0L
-  $laneFiles[$name] = @()
-}
-
-# Greedy: each file goes to the smallest lane
-foreach ($t in $tiffs) {
-  $smallest = $laneSizes.GetEnumerator() | Sort-Object Value | Select-Object -First 1
-  $laneSizes[$smallest.Key] += $t.Length
-  $laneFiles[$smallest.Key] += $t
+# Greedy bin-packing: assign each file to the lane with the smallest running total
+$laneBytes = New-Object 'long[]' $Lanes
+$assign = @{}   # file -> lane index (0-based)
+foreach ($f in $files) {
+    $min = 0
+    for ($i=1; $i -lt $Lanes; $i++) { if ($laneBytes[$i] -lt $laneBytes[$min]) { $min = $i } }
+    $assign[$f.FullName] = $min
+    $laneBytes[$min] += $f.Length
 }
 
-# Show the plan
+# Report
+Write-Host ("Files: {0}    Total: {1} GB`n" -f $files.Count, [math]::Round((($files|Measure-Object Length -Sum).Sum)/1GB,2))
+Write-Host ("{0,-8} {1,7} {2,12}" -f 'Lane','Files','Size(GB)')
+Write-Host ("{0,-8} {1,7} {2,12}" -f '----','-----','--------')
+for ($i=0; $i -lt $Lanes; $i++) {
+    $cnt = ($assign.Values | Where-Object { $_ -eq $i }).Count
+    Write-Host ("lane{0:D2}  {1,7} {2,12}" -f ($i+1), $cnt, [math]::Round($laneBytes[$i]/1GB,2))
+}
 Write-Host ""
-Write-Host "Plan:"
-Write-Host ("{0,-10} {1,7} {2,12}" -f "Lane", "Files", "Total GB")
-$laneSizes.GetEnumerator() | Sort-Object Name | ForEach-Object {
-  Write-Host ("{0,-10} {1,7} {2,12:N2}" -f $_.Key, $laneFiles[$_.Key].Count, ($_.Value / 1GB))
-}
 
 if (-not $Execute) {
-  Write-Host ""
-  Write-Host "Dry run complete. Re-run with -Execute to perform the moves."
-  exit 0
+    Write-Host "DRY RUN - nothing moved. Re-run with -Execute." -ForegroundColor Cyan
+    return
 }
 
-# Execute the moves
-Write-Host ""
-Write-Host "Moving files..."
-$null = New-Item -ItemType Directory -Path $LaneRoot -Force
-foreach ($lane in $laneFiles.Keys | Sort-Object) {
-  $laneDir = Join-Path $LaneRoot $lane
-  $null = New-Item -ItemType Directory -Path $laneDir -Force
-  foreach ($f in $laneFiles[$lane]) {
-    Move-Item -LiteralPath $f.FullName -Destination $laneDir
-  }
-  Write-Host ("  {0}: moved {1} files" -f $lane, $laneFiles[$lane].Count)
+# Execute
+$done=0; $skipped=0; $failed=0
+foreach ($f in $files) {
+    $laneDir = Join-Path $LaneRoot ("lane{0:D2}" -f ($assign[$f.FullName]+1))
+    if (-not (Test-Path -LiteralPath $laneDir)) { New-Item -ItemType Directory -Path $laneDir -Force | Out-Null }
+    $target = Join-Path $laneDir $f.Name
+    try {
+        if (Test-Path -LiteralPath $target) { $skipped++; continue }
+        if ($Copy) { Copy-Item -LiteralPath $f.FullName -Destination $target }
+        else       { Move-Item -LiteralPath $f.FullName -Destination $target }
+        $done++
+    } catch { Write-Warning "FAILED: $($f.Name) -> $($_.Exception.Message)"; $failed++ }
 }
-
-Write-Host ""
-Write-Host "Done."
+Write-Host "`nDone. $verb`d $done | Skipped $skipped | Failed $failed" -ForegroundColor Green
+Write-Host "Lanes are under: $LaneRoot"

@@ -1,6 +1,6 @@
 # Case Study 3 — FOXP1 WT/HET Organoid Calcium Imaging
 
-A *smaller* dataset (33 recordings, vs. ~1000 in the other case studies) processed for a collaborator. Demonstrates that the pipeline works well at modest scale, and surfaces a different failure mode — array-index errors during global signal detection on specific files — that the prior cases hadn't shown. Useful contrast to Cases 1 and 2.
+A *smaller* dataset (originally 33 recordings, 31 successful detection, 30 unique recordings in the final R analysis) processed for a collaborator. Demonstrates that the pipeline works well at modest scale, and surfaces a different failure mode — array-index errors during global signal detection — that the prior cases hadn't shown. Useful contrast to Cases 1 and 2.
 
 **Run date:** 2026  |  **Lab:** Birey Lab, Emory (collaboration)  |  **Pipeline version:** v2 (compiled exes)
 
@@ -11,9 +11,11 @@ A *smaller* dataset (33 recordings, vs. ~1000 in the other case studies) process
 | Property | Value |
 |---|---|
 | **N recordings (started)** | 33 |
-| **N recordings (completed)** | **31** (2 failed — see Section C) |
+| **N detection completions** | **31** (2 failed AQuA2 with array-index errors — see Section C) |
+| **N unique recordings analyzed in R** | **30** (one filename `FOXP1WT6_3` appeared twice in the file list and was de-duplicated) |
 | **Genotypes** | WT (wild-type), HET (FOXP1 heterozygous) |
 | **Donors** | 3 |
+| **Organoids** | 11 (WT1-6, HET1-5) — the V1/V2/V3 views are pseudoreplicate fields of one organoid |
 | **Magnification** | 20x objective |
 | **Acquisition rate** | 1.55 Hz nominal (CSV `frameRate=0.64` — close enough to 1/1.55=0.6452) |
 | **Spatial dimensions** | 512 × 512 pixels |

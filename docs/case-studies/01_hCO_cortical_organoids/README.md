@@ -1,6 +1,6 @@
 # Case Study 1 — Human Cortical Organoid (hCO) Calcium Imaging
 
-A worked example showing what a "large run" looked like in practice, with the real numbers, decisions, and a notable parameter-mixing problem that drove a full re-run. Use this for grounding the generic procedures in [`../03_SIZING_AND_RESIZING_GUIDE.md`](../03_SIZING_AND_RESIZING_GUIDE.md) and [`../04_PIPELINE_OPERATIONS.md`](../04_PIPELINE_OPERATIONS.md).
+A worked example showing what a "large run" looked like in practice, with the real numbers, decisions, and a notable parameter-mixing problem that drove a full re-run. Use this for grounding the generic procedures in [`../../03_SIZING_AND_RESIZING_GUIDE.md`](../../03_SIZING_AND_RESIZING_GUIDE.md) and [`../../04_PIPELINE_OPERATIONS.md`](../../04_PIPELINE_OPERATIONS.md).
 
 **Run date:** 2026  |  **Lab:** Birey Lab, Emory  |  **Pipeline version:** v1 (raw .m workers, pre-compilation) → v2 (compiled exes)
 
@@ -53,13 +53,18 @@ The original detection run used `maxSize=inf` (AQuA2 default). On the first pass
 
 The output was used briefly, but the lab realized the inconsistency was a problem for publication.
 
-### C.2 — The v2 re-run at a uniform maxSize
+### C.2 — The v2 re-run at uniform `maxSize=50000`
 
-After discussion, we re-ran the entire dataset at a uniform `maxSize` chosen to be appropriate for the dataset's activity profile. All 1191 files completed under that single uniform value. **This is the analysis set of record.**
+After discussion, we re-ran the entire dataset at uniform **`maxSize=50000`**. This is **directly confirmed** by the in-repo recovery script [`scripts/Repartition-hCO-v2.ps1`](scripts/Repartition-hCO-v2.ps1), whose comment block reads "for the maxSize=50000 re-run". The script symlinked all hCO input TIFFs into 32 fresh balanced lane folders for that re-run.
 
-The full parameter CSV for this run is archived in S3 at `_PipelineArtifacts/2026-06-03/config/parameters_for_batch_ProbablyCACNA1AhCO20xMay2026.csv`. The "Probably" in the filename reflects post-hoc archival uncertainty — the authoritative parameter values for this run live inside each `<stem>_AQuA2.mat` file's `opts` struct in S3, which AQuA2 writes at detection time. If exact reproducibility is needed, read `opts` from one of those files.
+`maxSize=50000` was a deliberate compromise:
+- High enough that most files don't hit the cap (so event sizes are reasonably preserved)
+- Low enough to force convergence on the hyperactive files
+- Applied uniformly across all 1191 files for cross-file comparability
 
-Confirmed parameters (consistent across archived hCO/Assembloid CSVs):
+Outcome: all 1191 files processed successfully at uniform `maxSize=50000`. **This is the analysis set of record.**
+
+Other detection parameters (matching the archived CSV, consistent across hCO and Assembloid runs):
 
 | Parameter | Value |
 |---|---|
@@ -69,6 +74,7 @@ Confirmed parameters (consistent across archived hCO/Assembloid CSVs):
 | `thrARScl` | 2 |
 | `minDur` | 3 |
 | `minSize` | 20 |
+| **`maxSize`** | **50000** (confirmed via `Repartition-hCO-v2.ps1`) |
 | `sigThr` | 2.5 |
 | `maxDelay` | 0.5 |
 | `sourceSensitivity` | 9 |
@@ -76,7 +82,8 @@ Confirmed parameters (consistent across archived hCO/Assembloid CSVs):
 | `gloDur` | 20 |
 | `frameRate` | 0.05 (20 Hz) |
 | `spatialRes` | 1.3 (20x) |
-| **`maxSize`** | Uniform across the dataset; specific value see archived CSV and `opts` in the `.mat` files |
+
+> **Side note on the archived CSV:** an earlier-stage CSV file (named `parameters_for_batch_ProbablyCACNA1AhCO20xMay2026.csv`, archived in S3 at `_PipelineArtifacts/2026-06-03/config/`) reads `maxSize=inf`. That CSV captured an intermediate state, not the final v2 run. The "Probably" prefix on the filename was a warning sign at archive time. The `Repartition-hCO-v2.ps1` comment supersedes the archived CSV.
 
 ### C.3 — What we did with v1
 
@@ -89,10 +96,10 @@ This "keep but archive" pattern has been useful — Deep Archive is cheap enough
 
 ### C.4 — Lessons
 
-- **Pick a uniform maxSize before the first run** and document it in a per-dataset README that gets uploaded with the data. The CSV gets overwritten by the next run, so without an external record the choice gets lost (or at minimum, uncertain enough to require forensic recovery from `.mat` `opts` structs).
-- **If a file hangs, isolate-and-exclude rather than re-running at different parameters.** Mixed parameters within a dataset is a hidden landmine. The v1 → v2 re-run for this dataset was driven by exactly that landmine — v1 had a few files re-processed at lower maxSize during recovery, creating implicit mixed parameters across the dataset that we later wanted to clean up.
-- **Document parameter choices in a README that travels with the data.** This wasn't done thoroughly here; we had to recover the parameter CSV from a file named `parameters_for_batch_ProbablyCACNA1AhCO20xMay2026.csv` archived on the EC2 instance — the "Probably" prefix tells you how much uncertainty had already crept in by archive time.
-- **The authoritative parameter record is the `opts` struct inside each `_AQuA2.mat` file.** AQuA2 writes the parameters used into the output. If you ever need to know what was actually used, read `opts` from a representative result file in S3. This is the only truly forensic source — CSV files can be overwritten, READMEs can be forgotten, but `opts` is baked into the output.
+- **Pick a uniform maxSize before the first run** and document it in a per-dataset README that gets uploaded with the data. The CSV gets overwritten by the next run; if the choice isn't captured externally, it gets lost.
+- **If a file hangs, isolate-and-exclude rather than re-running at different parameters.** Mixed parameters within a dataset is a hidden landmine. The v1 → v2 re-run for this dataset was driven by exactly that landmine — v1 had files re-processed at lower maxSize during recovery, creating implicit mixed parameters that we later wanted to clean up.
+- **The most authoritative parameter record is the `opts` struct inside each `_AQuA2.mat` file.** AQuA2 writes the parameters used into the output. If a CSV or README contradicts the `.mat`'s `opts`, the `.mat` wins.
+- **Names matter.** The archived CSV was helpfully tagged with "Probably" by past-you, signaling it shouldn't be trusted as authoritative without verification. That label saved us from the wrong answer.
 - **Deep Archive is cheap insurance** for old parameter runs you might want to revisit.
 
 ---

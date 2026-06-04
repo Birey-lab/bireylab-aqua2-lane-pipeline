@@ -1,83 +1,70 @@
 <#
 .SYNOPSIS
-  Launch N parallel AQuA2 detection workers, one per lane folder.
+  Launch K copies of the COMPILED aqua_lane.exe in parallel, one per lane.
+  No MATLAB, no -batch, no license checkout, no Emory login.
 
 .DESCRIPTION
-  For each laneNN/ subfolder under -LaneRoot, spawns one aqua_lane.exe process
-  in the background. Each worker reads C:\AQuA2\cfg\parameters_for_batch.csv
-  for parameters, processes its TIFFs sequentially, and writes outputs to
-  -ResultsRoot\laneNN_results\.
+  Each lane runs:  aqua_lane.exe "<laneNN>" "<laneNN_results>"
+  The exe reads parameters_for_batch.csv from C:\AQuA2\cfg at runtime (baked into aqua_lane.m),
+  so you can re-tune the CSV without recompiling. Per-lane stdout/stderr go to _lane_logs\laneNN.log.
 
-  Per-file try/catch is built into aqua_lane.exe (banner reads
-  "resume+per-file-guard=ON") — a single bad TIFF won't kill the lane.
+  REQUIREMENTS:
+    * aqua_lane.exe built with mcc (see build steps) at -ExePath.
+    * MATLAB Runtime (R2026a) installed on this instance.
+    * The 32-way re-split already done (lane01..lane32 under -LaneRoot).
 
-  Resume guard: re-running this script after an interruption skips files
-  whose <stem>_AQuA2.mat already exists.
-
-.PARAMETER LaneRoot
-  Folder containing laneNN/ subfolders (typically created by Split-IntoLanes.ps1).
-
-.PARAMETER ResultsRoot
-  Destination root; per-lane subfolders laneNN_results/ will be created here.
-
-.PARAMETER ExePath
-  Path to aqua_lane.exe. Default: C:\AQuA2\compiled\aqua_lane.exe
-
-.PARAMETER Lanes
-  Number of lanes to launch. Should match the number of laneNN/ folders under LaneRoot.
+  RESUME: re-run after any interruption - finished files are skipped by the resume guard.
 
 .EXAMPLE
-  .\Launch-Lanes-Exe.ps1 -LaneRoot C:\data\my_lanes -ResultsRoot C:\data\my_results -Lanes 32
+  powershell -ExecutionPolicy Bypass -File .\Launch-Lanes-Exe.ps1 -Lanes 32
 #>
+
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory)] [string]$LaneRoot,
-  [Parameter(Mandatory)] [string]$ResultsRoot,
-  [string]$ExePath = "C:\AQuA2\compiled\aqua_lane.exe",
-  [Parameter(Mandatory)] [int]$Lanes
+    [string]$LaneRoot    = "C:\Users\Administrator\Documents\hCO_lanes",
+    [string]$ResultsRoot = "C:\Users\Administrator\Documents\hCO_lanes",
+    [string]$ExePath     = "C:\AQuA2\compiled\aqua_lane.exe",
+    [Parameter(Mandatory=$true)][int]$Lanes,
+    [switch]$WhatIfOnly
 )
 
-if (-not (Test-Path $ExePath)) {
-  Write-Error "Worker executable not found: $ExePath"
-  exit 1
-}
-if (-not (Test-Path $LaneRoot)) {
-  Write-Error "LaneRoot not found: $LaneRoot"
-  exit 1
+$ErrorActionPreference = 'Stop'
+if (-not (Test-Path -LiteralPath $ExePath)) {
+    Write-Error "Compiled exe not found: $ExePath  (build it with mcc first)"; return
 }
 
-$null = New-Item -ItemType Directory -Path $ResultsRoot -Force
 $logDir = Join-Path $ResultsRoot "_lane_logs"
-$null = New-Item -ItemType Directory -Path $logDir -Force
+if (-not $WhatIfOnly -and -not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
-Write-Host ""
-Write-Host ("Launching {0} lanes..." -f $Lanes)
-Write-Host ("Worker:  {0}" -f $ExePath)
-Write-Host ("Logs:    {0}" -f $logDir)
-Write-Host ""
+Write-Host "`nLaunching $Lanes lane(s) from: $ExePath"
+Write-Host "Measured ~12 GB/lane -> ~$([math]::Round($Lanes*15)) GB budgeted (you have ~1 TB).  Logs: $logDir`n"
 
-for ($i = 1; $i -le $Lanes; $i++) {
-  $laneName  = "lane{0:D2}" -f $i
-  $laneIn    = Join-Path $LaneRoot $laneName
-  $laneOut   = Join-Path $ResultsRoot ($laneName + "_results")
-  $log       = Join-Path $logDir ($laneName + ".log")
-  $err       = Join-Path $logDir ($laneName + ".err")
+$started = @()
+for ($i=1; $i -le $Lanes; $i++) {
+    $tag  = "lane{0:D2}" -f $i
+    $pIn  = Join-Path $LaneRoot $tag                       # no trailing slash; exe normalizes
+    $pOut = Join-Path $ResultsRoot ($tag + "_results")
+    if (-not (Test-Path -LiteralPath $pIn)) { Write-Warning "$tag folder missing - skipping"; continue }
 
-  if (-not (Test-Path $laneIn)) {
-    Write-Warning ("  {0}: input folder not found ({1}) - skipping" -f $laneName, $laneIn)
-    continue
-  }
+    $log = Join-Path $logDir "$tag.log"
+    $err = Join-Path $logDir "$tag.err"
 
-  $null = New-Item -ItemType Directory -Path $laneOut -Force
-
-  # Use cmd /c wrapper to avoid PowerShell argument-mangling issues
-  # (see docs/06_PITFALLS_AND_RECOVERY.md Pitfall 2)
-  $cmd = "`"$ExePath`" `"$laneIn`" `"$laneOut`" > `"$log`" 2> `"$err`""
-  $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -PassThru -WindowStyle Hidden
-  Write-Host ("  started {0} (PID {1})" -f $laneName, $p.Id)
+    if ($WhatIfOnly) {
+        Write-Host "[would launch] $tag :  `"$ExePath`" `"$pIn`" `"$pOut`""
+        continue
+    }
+    $p = Start-Process -FilePath $ExePath -ArgumentList "`"$pIn`"", "`"$pOut`"" `
+            -RedirectStandardOutput $log -RedirectStandardError $err `
+            -WindowStyle Hidden -PassThru
+    $started += [pscustomobject]@{ Lane=$tag; PID=$p.Id }
+    Write-Host ("started {0}  (PID {1})" -f $tag, $p.Id)
+    Start-Sleep -Seconds 2
 }
 
-Write-Host ""
-Write-Host "All lanes launched. Monitor with:"
-Write-Host ("  Get-Process aqua_lane | Measure-Object | Select -Expand Count")
-Write-Host ("  Get-ChildItem $ResultsRoot -Recurse -Filter *_AQuA2.mat | Measure-Object | Select -Expand Count")
+if ($WhatIfOnly) { Write-Host "`n(WhatIfOnly: nothing launched.)"; return }
+
+Write-Host "`n$($started.Count) lane(s) running (no MATLAB license used). Monitor with:"
+Write-Host "    Get-Process aqua_lane | Measure-Object        # how many still alive"
+Write-Host "    Get-Content '$logDir\lane01.log' -Tail 20 -Wait"
+Write-Host "    Get-Content '$logDir\lane01.err' -Tail 20      # errors for a lane, if any"
+Write-Host "`nRe-run this launcher after any interruption - completed files are skipped."
