@@ -1,12 +1,16 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.7.1 (2026-06-04).
+    Version 0.7.2 (2026-06-04).
 
 .DESCRIPTION
-    v0.7.1 fix: PreCFU consolidation now uses per-stem subfolders (not
-    per-lane subfolders); PreCFU and PostCFU consolidation use hardlinks
-    instead of copies to avoid massive disk doubling on large .mat files.
+    v0.7.2 fix: PreCFU consolidation now copies ALL accessory files per stem
+    (_AQuA2.mat, _AQuA2_Ch1.csv, _AQuA2_Ch1_curves.xlsx, _AQuA2_Movie.tif,
+    and any other per-recording outputs), not just the .mat. Previous
+    v0.7.1 only grabbed the .mat which left CSV/xlsx/movie files behind.
+
+    v0.7.1 fix: PreCFU consolidation uses per-stem subfolders (not per-lane);
+    PreCFU and PostCFU use hardlinks instead of copies.
 
 .DESCRIPTION
     Runs any subset of the pipeline phases on a folder of TIFFs:
@@ -1600,10 +1604,17 @@ if ($Consolidate) {
     }
     Note ("  Hardlinked: {0}, copied: {1}, already present: {2}" -f $tiffLinked, $tiffCopied, $tiffSkipped)
 
-    # ---- PreCFU: per-stem subfolders, hardlinked (handles huge .mat files efficiently) ----
-    Note "Consolidating PreCFU outputs (per-stem subfolders, hardlinked)..."
+    # ---- PreCFU: per-stem subfolders, hardlinked. Each stem gets ALL its accessory files. ----
+    # AQuA2 produces per-recording bundles:
+    #   <stem>_AQuA2.mat            <- main results
+    #   <stem>_AQuA2_Ch1.csv        <- channel 1 data
+    #   <stem>_AQuA2_Ch1_curves.xlsx
+    #   <stem>_AQuA2_Movie.tif      <- visualization movie
+    #   ...possibly more
+    # We hardlink ALL of them into for_upload\PreCFU\<stem>\.
+    Note "Consolidating PreCFU outputs (per-stem subfolders, ALL accessory files, hardlinked)..."
 
-    # Detect any stale lane-organized layout from v0.7.0 (pre-fix) runs
+    # Detect stale lane-organized layout from v0.7.0 (pre-fix) runs
     $staleSubdirs = @(Get-ChildItem $upPreCFU -Directory -ErrorAction SilentlyContinue |
                       Where-Object { $_.Name -match '_results$' -or $_.Name -match '^lane\d+$' })
     if ($staleSubdirs.Count -gt 0) {
@@ -1614,35 +1625,47 @@ if ($Consolidate) {
         Warn2 "Proceeding with per-stem layout alongside (mixed structure)."
     }
 
-    # Find ALL _AQuA2.mat files anywhere under PreCFU; route each by stem
+    # Find ALL _AQuA2.mat files anywhere under PreCFU; route by stem
     $allMatFiles = @(Get-ChildItem $paths['PreCFU'] -Recurse -File -Filter "*_AQuA2.mat" -ErrorAction SilentlyContinue |
                      Where-Object { $_.DirectoryName -notmatch '\\_failures(\\|$)' })
-    Note ("  Found {0} _AQuA2.mat files in source PreCFU" -f $allMatFiles.Count)
+    Note ("  Found {0} _AQuA2.mat files (stems) in source PreCFU" -f $allMatFiles.Count)
+
     $preLinked = 0
     $preCopied = 0
     $preSkipped = 0
-    foreach ($m in $allMatFiles) {
-        $stem = ($m.Name -replace '_AQuA2\.mat$','')
+    $preFiles = 0
+    foreach ($matFile in $allMatFiles) {
+        $stem = ($matFile.Name -replace '_AQuA2\.mat$','')
         $destDir = Join-Path $upPreCFU $stem
         if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-        $destFile = Join-Path $destDir $m.Name
-        if (Test-Path $destFile) {
-            $preSkipped++
-            continue
-        }
-        try {
-            New-Item -ItemType HardLink -Path $destFile -Value $m.FullName -ErrorAction Stop | Out-Null
-            $preLinked++
-        } catch {
+
+        # Find ALL accessory files for this stem in the SAME directory as the .mat
+        # Filter "<stem>*" catches: _AQuA2.mat, _AQuA2_Ch1.csv, _AQuA2_Ch1_curves.xlsx,
+        # _AQuA2_Movie.tif, and any other per-recording outputs.
+        # _ERROR.txt files live under _failures/ subfolders (different directory) so excluded.
+        $stemFiles = @(Get-ChildItem $matFile.DirectoryName -File -Filter "$stem*" -ErrorAction SilentlyContinue)
+        $preFiles += $stemFiles.Count
+
+        foreach ($f in $stemFiles) {
+            $destFile = Join-Path $destDir $f.Name
+            if (Test-Path $destFile) {
+                $preSkipped++
+                continue
+            }
             try {
-                Copy-Item $m.FullName $destFile -Force
-                $preCopied++
+                New-Item -ItemType HardLink -Path $destFile -Value $f.FullName -ErrorAction Stop | Out-Null
+                $preLinked++
             } catch {
-                Warn2 ("Failed to consolidate {0}: {1}" -f $m.Name, $_.Exception.Message)
+                try {
+                    Copy-Item $f.FullName $destFile -Force
+                    $preCopied++
+                } catch {
+                    Warn2 ("Failed to consolidate {0}: {1}" -f $f.Name, $_.Exception.Message)
+                }
             }
         }
     }
-    Note ("  PreCFU: hardlinked={0}, copied={1}, already present={2}" -f $preLinked, $preCopied, $preSkipped)
+    Note ("  PreCFU: {0} stems, {1} total files (hardlinked={2}, copied={3}, already present={4})" -f $allMatFiles.Count, $preFiles, $preLinked, $preCopied, $preSkipped)
 
     # ---- PostCFU: flat dir, hardlinked (one .mat per stem, no subfolders) ----
     Note "Consolidating PostCFU outputs (flat layout, hardlinked)..."
