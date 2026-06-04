@@ -43,7 +43,7 @@ The pipeline takes raw multi-frame TIFFs (calcium fluorescence movies), splits t
 
 ## Lab-internal note: archived run artifacts
 
-For lab members continuing this work: pipeline artifacts from past runs (compiled `.exe` workers, MATLAB source tree, per-run `parameters_for_batch_*.csv` files) are archived at `s3://bireylab-arvin/CalciumImagingAnalysis/_PipelineArtifacts/` with date-stamped subfolders. The June 2026 snapshot includes the parameter CSVs for the CACNA1A hCO, CACNA1A Assembloid, and FOXP1 WT/HET runs documented in [`docs/case-studies/`](docs/case-studies/). Authoritative per-recording parameter values also live in each `_AQuA2.mat` file's `opts` struct in the per-dataset S3 prefixes.
+For lab members continuing this work: pipeline artifacts from past runs (compiled `.exe` workers, MATLAB source tree, per-run `parameters_for_batch_*.csv` files) are archived at `s3://bireylab-arvin-us-east-2/CalciumImagingAnalysis/ARCHIVE/_PipelineArtifacts/` with date-stamped subfolders. The June 2026 snapshot includes the parameter CSVs for the CACNA1A hCO, CACNA1A Assembloid, and FOXP1 WT/HET runs documented in [`docs/case-studies/`](docs/case-studies/). Authoritative per-recording parameter values also live in each `_AQuA2.mat` file's `opts` struct in the per-dataset S3 prefixes.
 
 ---
 

@@ -8,7 +8,7 @@ The canonical R analysis script for downstream statistics on AQuA2 + CFU outputs
 
 ## Version history
 
-Earlier versions of this script (v4.0 through v4.26) are archived in S3 at `s3://bireylab-arvin/CalciumImagingAnalysis/_PipelineArtifacts/2026-06-03/instance-scripts/R/`. The chronological evolution:
+Earlier versions of this script (v4.0 through v4.26) are archived in S3 at `s3://bireylab-arvin-us-east-2/CalciumImagingAnalysis/ARCHIVE/_PipelineArtifacts/2026-06-03/instance-scripts/R/`. The chronological evolution:
 
 | Version | Dataset | Key change |
 |---|---|---|
