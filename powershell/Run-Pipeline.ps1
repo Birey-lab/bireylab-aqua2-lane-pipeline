@@ -1,14 +1,43 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
+    Version 0.7 (2026-06-04).
 
 .DESCRIPTION
     Runs any subset of the pipeline phases on a folder of TIFFs:
       Phase 0 - Auto-size detection lanes (if -Lanes not specified)
-      Phase 1 - Split TIFFs into balanced lane folders   (-Split,  default ON)
-      Phase 2 - Detection (parallel aqua_lane.exe)       (-Detect, default ON)
-      Phase 3 - CFU build + run                          (-CFU,    default OFF)
-      Phase 4 - S3 upload                                (-Upload, default OFF)
+      Phase 1 - Split TIFFs into balanced lane folders   (-Split,       default ON)
+      Phase 2 - Detection (parallel aqua_lane.exe)       (-Detect,      default ON)
+      Phase 3 - CFU build + run                          (-CFU,         default ON in v0.7)
+      Phase 4 - Consolidate outputs into for_upload/     (-Consolidate, default OFF; auto-ON if Upload)
+      Phase 5 - S3 upload                                (-Upload,      default OFF)
+
+    REQUIRED parameters: -OutputRoot AND -ProjectName.
+    All data + audit content lives at <OutputRoot>/<ProjectName>/.
+
+    v0.7 changes from v0.6.3:
+    - -ProjectName is now REQUIRED. Project dir = <OutputRoot>/<ProjectName>/.
+    - Default CFU is now ON (Split + Detect + CFU run together).
+    - NEW Consolidate phase creates a flat layout at
+      <projectRoot>/for_upload/ with:
+        - input_TIFFs/   (flat; hardlinks to all source TIFFs)
+        - PreCFU/        (per-stem subfolders with _AQuA2.mat)
+        - PostCFU/       (flat; one _res_cfu.mat per stem)
+      Upload phase syncs for_upload/ to S3.
+    - Per-run audit subfolder _logs/run_<timestamp>[_<RunName>]/ contains
+      all audit artifacts for this run.
+    - Stall detection: warns at -StallWarnMin (default 15 min) and (if
+      policy is auto-skip) moves the stuck file aside + restarts that
+      lane's worker at -StallAutoSkipMin (default 60 min).
+    - Final summary shows stalled files prominently with file paths.
+    - Stale _ERROR.txt files at phase start are snapshotted; the "fail N"
+      counter shows only NEW failures from this run.
+    - ConfigCSV resolution simplified to -ConfigCSV or default (no
+      auto-detect or prompts); Show-CSVValues displays key values in plan
+      summary so you can sanity-check.
+    - Phase markers dual-written: top-level for resume detection,
+      per-run for historical record.
+    - Split phase warns explicitly that it MOVES files.
 
     The default ON-ON-OFF-OFF gives a natural checkpoint after detection:
     inspect results, verify file counts, adjust CFU lane count if needed,
@@ -105,12 +134,14 @@
 param(
     [string]$InputTIFFs,
     [Parameter(Mandatory=$true)] [string]$OutputRoot,
+    [Parameter(Mandatory=$true)] [string]$ProjectName,
 
-    # --- Phase toggles (default ON ON OFF OFF) ---
-    [bool]$Split  = $true,
-    [bool]$Detect = $true,
-    [bool]$CFU    = $false,
-    [bool]$Upload = $false,
+    # --- Phase toggles (default ON ON ON OFF OFF) ---
+    [bool]$Split        = $true,
+    [bool]$Detect       = $true,
+    [bool]$CFU          = $true,
+    [bool]$Consolidate  = $false,   # auto-set to $true if -Upload is $true
+    [bool]$Upload       = $false,
 
     # --- Detection parameters ---
     [int]$Lanes = 0,
@@ -121,6 +152,15 @@ param(
 
     # --- Upload ---
     [string]$S3Prefix = '',
+
+    # --- Run identification ---
+    [string]$RunName = '',
+
+    # --- Stall detection ---
+    [int]$StallWarnMin = 15,
+    [int]$StallAutoSkipMin = 60,
+    [ValidateSet('warn-only','auto-skip')]
+    [string]$StallPolicy = 'auto-skip',
 
     # --- Safety / behavior ---
     [int]$MinFreeDiskGB = 50,
@@ -133,6 +173,17 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Sanitize ProjectName to be filesystem-safe
+$ProjectName = $ProjectName -replace '[^A-Za-z0-9_\-\.]', '_'
+if (-not $ProjectName) {
+    throw "ProjectName cannot be empty or all invalid characters."
+}
+
+# Auto-enable Consolidate when Upload is on (otherwise leave as user specified)
+if ($Upload -and -not $Consolidate) {
+    $Consolidate = $true
+}
 
 # ==========================================================
 # Output helpers
@@ -171,10 +222,117 @@ function Get-AvailRAMGB {
 # ==========================================================
 # Audit-trail helpers
 # ==========================================================
+function Get-LanePID {
+    # Find PID of aqua_lane.exe (or cfu_lane.exe) processing a given lane folder
+    # by matching the FULL lane path in the process's CommandLine.
+    # Using full path avoids lane2-vs-lane20 substring collisions.
+    param([string]$LaneFolder, [string]$WorkerExeName)
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "Name = '$WorkerExeName'" -ErrorAction SilentlyContinue
+        $pattern = [regex]::Escape($LaneFolder)
+        foreach ($p in $procs) {
+            if ($p.CommandLine -and ($p.CommandLine -match $pattern)) {
+                return $p.ProcessId
+            }
+        }
+    } catch { }
+    return $null
+}
+
+function Find-StuckFile {
+    # Given a lane folder and a results root, find the .tif that's most likely the stuck file:
+    # one that exists in the lane folder but has no matching _AQuA2.mat in the results root.
+    param([string]$LaneFolder, [string]$ResultsRoot)
+    $laneTiffs = @(Get-ChildItem $LaneFolder -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue)
+    foreach ($t in $laneTiffs) {
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($t.Name)
+        $expectedMat = Join-Path (Join-Path $ResultsRoot $stem) ("{0}_AQuA2.mat" -f $stem)
+        if (-not (Test-Path $expectedMat)) {
+            return $t  # FileInfo of stuck file
+        }
+    }
+    return $null
+}
+
+function Invoke-AutoSkipFile {
+    # When auto-skip policy fires, move stuck file aside and restart the lane worker.
+    # Returns $true if a skip was performed, $false otherwise.
+    param(
+        [string]$LaneFolder,
+        [string]$ResultsRoot,
+        [string]$WorkerExe,    # full path to aqua_lane.exe
+        [string]$LogPath,      # full path to lane log
+        [string]$StallLogPath  # full path to stall_log.txt
+    )
+    $laneName = Split-Path $LaneFolder -Leaf
+    $stuck = Find-StuckFile -LaneFolder $LaneFolder -ResultsRoot $ResultsRoot
+    if (-not $stuck) {
+        return $false
+    }
+    Warn2 ("Stall auto-skip: {0} stuck on {1}" -f $laneName, $stuck.Name)
+
+    # Identify and kill the worker for this lane
+    $exeName = Split-Path $WorkerExe -Leaf
+    $stuckPID = Get-LanePID -LaneFolder $LaneFolder -WorkerExeName $exeName
+    if ($stuckPID) {
+        Warn2 ("Killing stuck worker PID {0}..." -f $stuckPID)
+        Stop-Process -Id $stuckPID -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    } else {
+        Warn2 "Could not identify stuck worker PID by lane match. Continuing with file quarantine anyway."
+    }
+
+    # Move stuck file to _stalled/ subfolder
+    $stalledDir = Join-Path $LaneFolder "_stalled"
+    if (-not (Test-Path $stalledDir)) { New-Item -ItemType Directory -Path $stalledDir -Force | Out-Null }
+    try {
+        Move-Item -Path $stuck.FullName -Destination (Join-Path $stalledDir $stuck.Name) -Force
+        Warn2 ("Moved {0} -> {1}\" -f $stuck.Name, $stalledDir)
+    } catch {
+        Err2 ("Could not move stuck file: {0}" -f $_.Exception.Message)
+        return $false
+    }
+
+    # Append to stall log
+    $entry = @"
+[$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')] Auto-skip on lane $laneName
+  Stuck file: $($stuck.FullName)
+  Quarantined to: $stalledDir\$($stuck.Name)
+  Killed worker PID: $stuckPID
+  Worker exe: $WorkerExe
+"@
+    Add-Content -Path $StallLogPath -Value $entry
+
+    # Restart the worker on this lane (it will skip done files + the quarantined one)
+    try {
+        $proc = Start-Process -FilePath $WorkerExe `
+            -ArgumentList "`"$LaneFolder`"", "`"$ResultsRoot`"" `
+            -RedirectStandardOutput $LogPath `
+            -RedirectStandardError ("$LogPath.err") `
+            -PassThru -NoNewWindow
+        Note ("Restarted worker on {0}: new PID {1}" -f $laneName, $proc.Id)
+    } catch {
+        Err2 ("Failed to restart worker for {0}: {1}" -f $laneName, $_.Exception.Message)
+        return $false
+    }
+    return $true
+}
+
+function Get-LaneLogTail {
+    # Return the last N non-empty lines of a lane log file
+    param([string]$LogPath, [int]$N = 3)
+    if (-not (Test-Path $LogPath)) { return @() }
+    try {
+        return @(Get-Content $LogPath -Tail $N -ErrorAction SilentlyContinue | Where-Object { $_ -ne '' })
+    } catch {
+        return @()
+    }
+}
+
 function Save-ParametersInUse {
-    # Copy active parameters_for_batch.csv into _logs/
+    # Copy active parameters_for_batch.csv into per-run audit dir
     $activeCSV = "C:\AQuA2\cfg\parameters_for_batch.csv"
-    $dest = Join-Path $paths['logs'] "parameters_for_batch_USED.csv"
+    $dest = Join-Path $runAuditDir "parameters_for_batch_USED.csv"
     if (Test-Path $activeCSV) {
         Copy-Item $activeCSV $dest -Force
         OK2 ("audit: archived active parameters_for_batch.csv -> {0}" -f $dest)
@@ -185,7 +343,7 @@ function Save-ParametersInUse {
 
 function Save-CFUBakedParameters {
     $bakedSrc = "C:\AQuA2\cfg\cfu_parameters_BAKED.txt"
-    $dest = Join-Path $paths['logs'] "cfu_parameters_BAKED.txt"
+    $dest = Join-Path $runAuditDir "cfu_parameters_BAKED.txt"
     if (Test-Path $bakedSrc) {
         Copy-Item $bakedSrc $dest -Force
         OK2 ("audit: archived CFU baked-parameters reference -> {0}" -f $dest)
@@ -215,7 +373,6 @@ function Write-PerFileStatus {
             location     = $f.DirectoryName
         })
     }
-    # _ERROR.txt files (under _failures/ folders or alongside outputs)
     $failFiles = Get-ChildItem $ResultsDir -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue
     foreach ($f in $failFiles) {
         [void]$rows.Add([pscustomobject]@{
@@ -227,13 +384,50 @@ function Write-PerFileStatus {
             location     = $f.DirectoryName
         })
     }
-    $dest = Join-Path $paths['logs'] ("per_file_status_{0}.csv" -f $Phase)
+    $dest = Join-Path $runAuditDir ("per_file_status_{0}.csv" -f $Phase)
     if ($rows.Count -gt 0) {
         $rows | Export-Csv -Path $dest -NoTypeInformation
         OK2 ("audit: per-file status CSV -> {0} ({1} files)" -f $dest, $rows.Count)
     } else {
         Warn2 ("audit: no result files found for $Phase phase")
     }
+}
+
+function Save-FailuresSummary {
+    param([string]$Phase, [string]$ResultsDir)
+
+    $errFiles = @(Get-ChildItem $ResultsDir -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue)
+    if ($errFiles.Count -eq 0) { return }
+
+    $failDir = Join-Path $runAuditDir "failures"
+    if (-not (Test-Path $failDir)) { New-Item -ItemType Directory -Path $failDir -Force | Out-Null }
+    $phaseFailDir = Join-Path $failDir $Phase
+    if (-not (Test-Path $phaseFailDir)) { New-Item -ItemType Directory -Path $phaseFailDir -Force | Out-Null }
+
+    $summary = New-Object System.Collections.ArrayList
+    [void]$summary.Add("# Failures during $Phase phase")
+    [void]$summary.Add("")
+    [void]$summary.Add("Total failed files: $($errFiles.Count)")
+    [void]$summary.Add("")
+    foreach ($e in $errFiles) {
+        $stem = ($e.Name -replace '_ERROR\.txt$','')
+        # Copy the error file into per-run audit dir for easy access
+        Copy-Item $e.FullName (Join-Path $phaseFailDir $e.Name) -Force
+        # Add summary entry with first few lines of error
+        [void]$summary.Add("## $stem")
+        [void]$summary.Add("- Original: ``$($e.FullName)``")
+        [void]$summary.Add("- Modified: $($e.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))")
+        [void]$summary.Add("")
+        [void]$summary.Add("Error excerpt:")
+        [void]$summary.Add('```')
+        $errLines = Get-Content $e.FullName -TotalCount 10 -ErrorAction SilentlyContinue
+        foreach ($l in $errLines) { [void]$summary.Add($l) }
+        [void]$summary.Add('```')
+        [void]$summary.Add("")
+    }
+    $summaryPath = Join-Path $runAuditDir ("failures_summary_${Phase}.md")
+    $summary -join "`n" | Out-File $summaryPath -Encoding UTF8
+    OK2 ("audit: failures summary -> {0} ({1} files)" -f $summaryPath, $errFiles.Count)
 }
 
 function Write-RunManifest {
@@ -248,15 +442,19 @@ function Write-RunManifest {
     $phasesRun = @()
     if ($Split)  { $phasesRun += 'split' }
     if ($Detect) { $phasesRun += 'detect' }
-    if ($CFU)    { $phasesRun += 'cfu' }
-    if ($Upload) { $phasesRun += 'upload' }
+    if ($CFU)         { $phasesRun += 'cfu' }
+    if ($Consolidate) { $phasesRun += 'consolidate' }
+    if ($Upload)      { $phasesRun += 'upload' }
 
     $manifest = [ordered]@{
         run_id           = $Started.ToString('yyyyMMdd_HHmmss')
         started          = $Started.ToString('yyyy-MM-ddTHH:mm:ss')
         completed        = $Completed.ToString('yyyy-MM-ddTHH:mm:ss')
         wall_clock       = ('{0:hh\:mm\:ss}' -f ($Completed - $Started))
-        output_root      = $OutputRoot
+        project_name     = $ProjectName
+        output_base      = $OutputRoot
+        project_root     = $projectRoot
+        run_label        = $RunName
         input_tiffs      = $InputTIFFs
         phases_run       = $phasesRun
         detection_lanes  = $Lanes
@@ -283,7 +481,7 @@ function Write-RunManifest {
         counts           = $Counts
     }
 
-    $dest = Join-Path $paths['logs'] "run_manifest.json"
+    $dest = Join-Path $runAuditDir "run_manifest.json"
     $manifest | ConvertTo-Json -Depth 6 | Out-File $dest -Encoding UTF8
     OK2 ("audit: machine-readable manifest -> {0}" -f $dest)
 }
@@ -367,9 +565,75 @@ These are compiled into ``cfu_lane.exe``. To change, edit ``C:\AQuA2\cfu_lane.m`
 - Authoritative per-file parameters: ``opts`` struct inside each ``_AQuA2.mat`` file
 "@
 
-    $dest = Join-Path $paths['logs'] "RUN_SUMMARY.md"
+    $dest = Join-Path $runAuditDir "RUN_SUMMARY.md"
     $md | Out-File $dest -Encoding UTF8
     OK2 ("audit: human-readable summary -> {0}" -f $dest)
+}
+
+# ==========================================================
+# ConfigCSV resolution + parsing helpers
+# ==========================================================
+function Get-CSVKeyValues {
+    # Parse parameters_for_batch.csv and return key values for display.
+    # Format: rows like "frameRate,19.08" or "maxSize,50000"
+    param([string]$CSVPath)
+    $values = [ordered]@{}
+    if (-not (Test-Path $CSVPath)) { return $values }
+    try {
+        $lines = Get-Content $CSVPath -ErrorAction Stop
+        foreach ($line in $lines) {
+            if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,=:\t]\s*(.+?)\s*$') {
+                $key = $Matches[1]
+                $val = $Matches[2].Trim().Trim('"').Trim("'")
+                $values[$key] = $val
+            }
+        }
+    } catch {
+        # Parse failure; return partial
+    }
+    return $values
+}
+
+function Show-CSVValues {
+    # Print key parameter values from a CSV for user sanity-check.
+    param([string]$CSVPath, [string]$Label = 'Parameters in effect')
+    $vals = Get-CSVKeyValues -CSVPath $CSVPath
+    if ($vals.Count -eq 0) {
+        Note "  (could not parse $CSVPath; will use as-is)"
+        return
+    }
+    Write-Host "  ==== $Label ===="
+    Write-Host ("  Source: {0}" -f $CSVPath)
+    Write-Host ("  Modified: {0}" -f (Get-Item $CSVPath).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
+    Write-Host "  Key values:"
+    # Highlight common AQuA2 parameters of interest
+    $interesting = @('frameRate','spatialRes','maxSize','minSize','thrARScl','sourceSensitivity','smoXY','smoXY1','smoT')
+    foreach ($k in $interesting) {
+        if ($vals.Contains($k)) {
+            Write-Host ("    {0,-22} = {1}" -f $k, $vals[$k])
+        }
+    }
+    Write-Host ("  ({0} total parameter rows)" -f $vals.Count)
+}
+
+function Resolve-ConfigCSV {
+    # Simple resolution: use explicit -ConfigCSV if given, else the default at
+    # C:\AQuA2\cfg\parameters_for_batch.csv. NO auto-detect from InputTIFFs or
+    # OutputRoot. NO multi-candidate prompts. The user must opt in to a
+    # non-default CSV by passing -ConfigCSV explicitly.
+    param([string]$ExplicitCSV)
+    $defaultCSV = "C:\AQuA2\cfg\parameters_for_batch.csv"
+
+    if ($ExplicitCSV) {
+        if (-not (Test-Path $ExplicitCSV)) {
+            Write-Error "ConfigCSV not found: $ExplicitCSV"
+        }
+        return $ExplicitCSV
+    }
+    if (-not (Test-Path $defaultCSV)) {
+        Write-Error "Default ConfigCSV not found at $defaultCSV. Either install it on the AMI or pass -ConfigCSV explicitly."
+    }
+    return $defaultCSV
 }
 
 $pipelineStart = Get-Date
@@ -382,18 +646,32 @@ if (-not (Test-Path $OutputRoot)) {
 }
 $OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
 
+# Project root = <OutputRoot>/<ProjectName>/ -- all data + audit lives here
+$projectRoot = Join-Path $OutputRoot $ProjectName
+if (-not (Test-Path $projectRoot)) {
+    New-Item -ItemType Directory -Path $projectRoot -Force | Out-Null
+}
+
 $paths = @{
-    'lanes'      = Join-Path $OutputRoot 'lanes'
-    'PreCFU'     = Join-Path $OutputRoot 'PreCFU'
-    'CFU_lanes'  = Join-Path $OutputRoot 'CFU_lanes'
-    'POST'       = Join-Path $OutputRoot 'POST'
-    'logs'       = Join-Path $OutputRoot '_logs'
+    'lanes'      = Join-Path $projectRoot 'lanes'
+    'PreCFU'     = Join-Path $projectRoot 'PreCFU'
+    'CFU_lanes'  = Join-Path $projectRoot 'CFU_lanes'
+    'POST'       = Join-Path $projectRoot 'POST'
+    'logs'       = Join-Path $projectRoot '_logs'
+    'for_upload' = Join-Path $projectRoot 'for_upload'
 }
 foreach ($p in $paths.Values) {
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 }
 
-$masterLog = Join-Path $paths['logs'] ("pipeline_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+# Per-run audit subfolder: _logs/run_<timestamp>[_<RunName>]/
+$runTimestamp = $pipelineStart.ToString('yyyyMMdd_HHmmss')
+$runFolderName = if ($RunName) { "run_${runTimestamp}_${RunName}" } else { "run_${runTimestamp}" }
+$runFolderName = $runFolderName -replace '[^A-Za-z0-9_\-]', '_'
+$runAuditDir = Join-Path $paths['logs'] $runFolderName
+New-Item -ItemType Directory -Path $runAuditDir -Force | Out-Null
+
+$masterLog = Join-Path $runAuditDir "pipeline.log"
 Start-Transcript -Path $masterLog -Append | Out-Null
 
 # ==========================================================
@@ -401,9 +679,15 @@ Start-Transcript -Path $masterLog -Append | Out-Null
 # ==========================================================
 Hdr "AQuA2 Pipeline Orchestrator"
 Note ("Started:           {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+Note ("Project name:      {0}" -f $ProjectName)
+Note ("Output base:       {0}" -f $OutputRoot)
+Note ("Project root:      {0}" -f $projectRoot)
 Note ("Input TIFFs:       {0}" -f $InputTIFFs)
-Note ("Output root:       {0}" -f $OutputRoot)
+Note ("Run audit dir:     {0}" -f $runAuditDir)
 Note ("Master log:        {0}" -f $masterLog)
+if ($RunName) {
+    Note ("Run label:         {0}" -f $RunName)
+}
 
 # ==========================================================
 # Pre-flight checks
@@ -588,16 +872,18 @@ if ($checksFailed -gt 0) {
 Hdr "Plan summary"
 
 # Phase-complete markers (written at end of each successful phase)
-$markerSplit  = Join-Path $paths['logs'] 'PHASE_split_COMPLETE.txt'
-$markerDetect = Join-Path $paths['logs'] 'PHASE_detect_COMPLETE.txt'
-$markerCFU    = Join-Path $paths['logs'] 'PHASE_cfu_COMPLETE.txt'
-$markerUpload = Join-Path $paths['logs'] 'PHASE_upload_COMPLETE.txt'
+$markerSplit       = Join-Path $paths['logs'] 'PHASE_split_COMPLETE.txt'
+$markerDetect      = Join-Path $paths['logs'] 'PHASE_detect_COMPLETE.txt'
+$markerCFU         = Join-Path $paths['logs'] 'PHASE_cfu_COMPLETE.txt'
+$markerConsolidate = Join-Path $paths['logs'] 'PHASE_consolidate_COMPLETE.txt'
+$markerUpload      = Join-Path $paths['logs'] 'PHASE_upload_COMPLETE.txt'
 
 $phaseList = @(
-    @{ name='Split TIFFs into lanes';        on=$Split;  marker=$markerSplit  },
-    @{ name='Detection (aqua_lane.exe)';     on=$Detect; marker=$markerDetect },
-    @{ name='CFU (build junctions + run)';   on=$CFU;    marker=$markerCFU    },
-    @{ name='S3 upload';                     on=$Upload; marker=$markerUpload }
+    @{ name='Split TIFFs into lanes';            on=$Split;       marker=$markerSplit       },
+    @{ name='Detection (aqua_lane.exe)';         on=$Detect;      marker=$markerDetect      },
+    @{ name='CFU (build junctions + run)';       on=$CFU;         marker=$markerCFU         },
+    @{ name='Consolidate (flat layout for S3)';  on=$Consolidate; marker=$markerConsolidate },
+    @{ name='S3 upload';                         on=$Upload;      marker=$markerUpload      }
 )
 foreach ($p in $phaseList) {
     $sym = if ($p.on) { '[X]' } else { '[ ]' }
@@ -627,7 +913,8 @@ if ($existingDetect -gt 0 -or $existingCFU -gt 0) {
 }
 
 if ($Lanes -le 0) {
-    Note "Detection lanes:    will auto-size (probe largest input TIFF)"
+    Note "Detection lanes:    will auto-size (probe largest input TIFF) -- if Split=true"
+    Note "                    or will derive from existing lane folders -- if Split=false"
 } else {
     Note ("Detection lanes:    {0}" -f $Lanes)
 }
@@ -636,12 +923,21 @@ if ($CFULanes -le 0) {
 } else {
     Note ("CFU lanes:          {0}" -f $CFULanes)
 }
-if ($ConfigCSV) {
-    Note ("Config CSV:         {0}" -f $ConfigCSV)
-    Note "                    (will be copied to C:\AQuA2\cfg\parameters_for_batch.csv; existing backed up first)"
-} else {
-    Note "Config CSV:         existing C:\AQuA2\cfg\parameters_for_batch.csv (unchanged)"
+
+# Resolve and display the parameters_for_batch.csv that will be used
+if ($Detect) {
+    $resolvedCSV = Resolve-ConfigCSV -ExplicitCSV $ConfigCSV
+    Write-Host ""
+    Show-CSVValues -CSVPath $resolvedCSV -Label 'Detection parameters in effect'
+    Write-Host ""
+    if ($resolvedCSV -ne "C:\AQuA2\cfg\parameters_for_batch.csv") {
+        Note "  (will be copied to C:\AQuA2\cfg\parameters_for_batch.csv at detection start; existing backed up)"
+    } else {
+        Note "  (already at the expected location; no copy needed)"
+    }
+    $script:resolvedConfigCSV = $resolvedCSV
 }
+
 if ($Upload -and $S3Prefix) {
     Note ("S3 destination:     {0}" -f $S3Prefix)
 }
@@ -650,6 +946,27 @@ Note ("Free disk:          {0} GB" -f $freeNow)
 if ($estNeed -gt 0) {
     Note ("Estimated need:     {0} GB (input x 5)" -f $estNeed)
 }
+
+# Stall detection info
+if ($Detect -or $CFU) {
+    Write-Host ""
+    Note "Stall detection:"
+    Note ("  Warn after:     {0} min with no progress" -f $StallWarnMin)
+    Note ("  Auto-action:    after {0} min (policy: {1})" -f $StallAutoSkipMin, $StallPolicy)
+    if ($StallPolicy -eq 'auto-skip') {
+        Note "  When triggered: move the stuck file to <lane>\_stalled\, kill+restart worker, continue lane"
+    } else {
+        Note "  When triggered: warn only; user must intervene manually"
+    }
+}
+
+# Split move warning
+if ($Split) {
+    Write-Host ""
+    Warn2 ("Phase 1 (Split) MOVES TIFFs from {0} into {1}\lane<N>\" -f $InputTIFFs, $paths['lanes'])
+    Warn2 "Originals are REMOVED from InputTIFFs. To keep originals, copy them elsewhere first."
+}
+
 Write-Host ""
 Note "To cancel mid-run:"
 Note "  Get-Process aqua_lane,cfu_lane -ErrorAction SilentlyContinue | Stop-Process -Force"
@@ -727,33 +1044,45 @@ if ($Split) {
     Note ("Created {0} lane folders" -f $laneFolders.Count)
     PhaseEnd 1 "Split" $start $null
 
-    # Phase-complete marker
-    @"
+    # Phase-complete markers: dual-write (top-level for resume, per-run for history)
+    $splitMarkerContent = @"
 Split phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
 Lane folders created: $($laneFolders.Count)
 Input TIFFs:          $inputCount
 Lane root:            $($paths['lanes'])
-"@ | Out-File $markerSplit -Encoding UTF8
+Run audit dir:        $runAuditDir
+"@
+    $splitMarkerContent | Out-File $markerSplit -Encoding UTF8
+    $splitMarkerContent | Out-File (Join-Path $runAuditDir 'PHASE_split_COMPLETE.txt') -Encoding UTF8
 }
 
 # ==========================================================
 # Phase 2: Detection
 # ==========================================================
 if ($Detect) {
-    # Swap config CSV if requested
-    if ($ConfigCSV) {
-        $defaultCSV = "C:\AQuA2\cfg\parameters_for_batch.csv"
+    # Swap config CSV if the resolved one differs from the default location
+    $defaultCSV = "C:\AQuA2\cfg\parameters_for_batch.csv"
+    $sourceCSV = if ($script:resolvedConfigCSV) { $script:resolvedConfigCSV } else { $defaultCSV }
+    if ($sourceCSV -and (Test-Path $sourceCSV) -and ($sourceCSV -ne $defaultCSV)) {
         if (Test-Path $defaultCSV) {
             $backup = "$defaultCSV.bak_$(Get-Date -Format 'yyyyMMddHHmmss')"
             Copy-Item $defaultCSV $backup
             Note ("Backed up existing default CSV to {0}" -f $backup)
         }
-        Copy-Item $ConfigCSV $defaultCSV -Force
+        Copy-Item $sourceCSV $defaultCSV -Force
+        Note ("Active config CSV (copied from {0}): {1}" -f $sourceCSV, $defaultCSV)
+    } else {
         Note ("Active config CSV: {0}" -f $defaultCSV)
     }
 
-    # Archive the active CSV into _logs/ BEFORE detection starts
+    # Archive the active CSV into per-run audit dir BEFORE detection starts
     Save-ParametersInUse
+
+    # Snapshot stale failure count so we only report NEW failures from this run
+    $baselineFailures = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue).Count
+    if ($baselineFailures -gt 0) {
+        Note ("Pre-existing _ERROR.txt files at phase start: {0} (will be ignored in 'fail' counter)" -f $baselineFailures)
+    }
 
     Phase 2 ("Detection ({0} parallel workers)" -f $Lanes)
     $start = Get-Date
@@ -785,14 +1114,21 @@ if ($Detect) {
     $aborted = $false
     $noWorkersStreak = 0
     $everSawWorkers = $false
+    # Per-lane stall tracking: laneName -> @{ lastCount=N; lastChangeAt=DateTime; warned=$false }
+    $laneStall = @{}
+    $stallLogPath = Join-Path $runAuditDir "stall_log.txt"
+    $laneLogDir = Join-Path $paths['PreCFU'] '_lane_logs'
 
     while ($true) {
         $workers = @(Get-Process aqua_lane -ErrorAction SilentlyContinue)
         $workerCount = $workers.Count
         if ($workerCount -gt 0) { $everSawWorkers = $true }
 
-        $completed = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue).Count
-        $failures  = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue).Count
+        $rawCompleted = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue).Count
+        $rawFailures  = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue).Count
+        # Adjust failures by subtracting baseline (stale failures from previous runs)
+        $completed = $rawCompleted
+        $failures  = [math]::Max(0, $rawFailures - $baselineFailures)
         $free      = Get-FreeGB
         $availRAM  = Get-AvailRAMGB
         $elapsed   = (Get-Date) - $start
@@ -816,18 +1152,80 @@ if ($Detect) {
             -f (Get-Date -Format 'HH:mm:ss'), $completed, $tifCount, $pct, $rate, $etaStr, $workerCount, $Lanes, $availRAM, $free, $failures
         )
 
+        # ===== Per-lane stall tracking =====
+        $laneFolders = @(Get-ChildItem $paths['lanes'] -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^lane' })
+        foreach ($laneDir in $laneFolders) {
+            $laneName = $laneDir.Name
+            # Count completed _AQuA2.mat for files originating from this lane
+            $expectedTiffs = @(Get-ChildItem $laneDir.FullName -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue)
+            $laneCompleted = 0
+            foreach ($t in $expectedTiffs) {
+                $stem = [System.IO.Path]::GetFileNameWithoutExtension($t.Name)
+                $expectedMat = Join-Path (Join-Path $paths['PreCFU'] $stem) ("{0}_AQuA2.mat" -f $stem)
+                if (Test-Path $expectedMat) { $laneCompleted++ }
+            }
+            # Check if this lane's worker is still alive
+            $lanePID = Get-LanePID -LaneFolder $laneDir.FullName -WorkerExeName 'aqua_lane.exe'
+            $laneAlive = ($lanePID -ne $null)
+
+            if (-not $laneStall.ContainsKey($laneName)) {
+                $laneStall[$laneName] = @{ lastCount=$laneCompleted; lastChangeAt=Get-Date; warned=$false }
+            } elseif ($laneCompleted -ne $laneStall[$laneName].lastCount) {
+                $laneStall[$laneName].lastCount = $laneCompleted
+                $laneStall[$laneName].lastChangeAt = Get-Date
+                $laneStall[$laneName].warned = $false
+            } else {
+                # No progress in this lane; if worker is still alive, check stall thresholds
+                if ($laneAlive) {
+                    $stalledMin = ((Get-Date) - $laneStall[$laneName].lastChangeAt).TotalMinutes
+                    # Warn threshold
+                    if ($stalledMin -ge $StallWarnMin -and -not $laneStall[$laneName].warned) {
+                        Write-Host ""
+                        Warn2 ("[STALL WARN] {0} (PID {1}) has made no progress for {2:N1} min" -f $laneName, $lanePID, $stalledMin)
+                        $laneLog = Join-Path $laneLogDir ("{0}.log" -f $laneName)
+                        $tail = Get-LaneLogTail -LogPath $laneLog -N 5
+                        if ($tail) {
+                            Warn2 "  Last lines from $laneName log:"
+                            foreach ($l in $tail) { Warn2 "    $l" }
+                        }
+                        $laneStall[$laneName].warned = $true
+                        Write-Host ""
+                    }
+                    # Auto-skip threshold
+                    if ($stalledMin -ge $StallAutoSkipMin -and $StallPolicy -eq 'auto-skip') {
+                        Write-Host ""
+                        Warn2 ("[STALL AUTO-SKIP] {0} stalled for {1:N1} min -- moving stuck file aside and restarting" -f $laneName, $stalledMin)
+                        $laneLogPath = Join-Path $laneLogDir ("{0}.log" -f $laneName)
+                        $didSkip = Invoke-AutoSkipFile `
+                            -LaneFolder $laneDir.FullName `
+                            -ResultsRoot $paths['PreCFU'] `
+                            -WorkerExe "C:\AQuA2\compiled\aqua_lane.exe" `
+                            -LogPath $laneLogPath `
+                            -StallLogPath $stallLogPath
+                        if ($didSkip) {
+                            # Reset stall tracking for this lane
+                            $laneStall[$laneName].lastChangeAt = Get-Date
+                            $laneStall[$laneName].warned = $false
+                            Start-Sleep -Seconds 5  # let new worker register
+                        } else {
+                            Warn2 ("Auto-skip did not succeed for {0}; will warn again at next interval." -f $laneName)
+                        }
+                        Write-Host ""
+                    }
+                }
+            }
+        }
+
         # --- Exit conditions ---
         if ($workerCount -eq 0) {
             $noWorkersStreak++
         } else {
             $noWorkersStreak = 0
         }
-        # Detection complete: workers were running and are now gone for 2 consecutive polls
         if ($everSawWorkers -and $noWorkersStreak -ge 2) {
             Note "All detection workers have exited."
             break
         }
-        # Sanity: launcher returned but no workers ever appeared (>90s in)
         if (-not $everSawWorkers -and $elapsed.TotalSeconds -gt 90) {
             Err2 "Launcher returned but no aqua_lane.exe workers detected after 90s."
             Err2 "Check Launch-Lanes-Exe.ps1 output above for errors. Aborting."
@@ -855,8 +1253,19 @@ if ($Detect) {
                 $eta = (Get-Date).AddMinutes($etaMin)
                 Write-Host ("  ETA: {0} min (~{1})" -f $etaMin, $eta.ToString('HH:mm'))
             }
+            # Per-lane progress + log tail
+            Write-Host "  Per-lane progress:"
+            foreach ($ln in $laneStall.Keys | Sort-Object) {
+                $stallMin = ((Get-Date) - $laneStall[$ln].lastChangeAt).TotalMinutes
+                $alive = (Get-LanePID -LaneFolder (Join-Path $paths['lanes'] $ln) -WorkerExeName 'aqua_lane.exe') -ne $null
+                $aliveStr = if ($alive) { 'ALIVE' } else { 'gone ' }
+                Write-Host ("    {0}: {1} ({2:N1} min since last completion in lane) [{3}]" -f $ln, $laneStall[$ln].lastCount, $stallMin, $aliveStr)
+                $laneLog = Join-Path $laneLogDir ("{0}.log" -f $ln)
+                $tail = Get-LaneLogTail -LogPath $laneLog -N 2
+                foreach ($l in $tail) { Write-Host ("      | $l") }
+            }
             if ($failures -gt 0) {
-                Write-Host "  Recent failures (last 3):"
+                Write-Host "  Recent NEW failures (last 3):"
                 Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_ERROR.txt" -File |
                     Sort-Object LastWriteTime -Desc | Select-Object -First 3 |
                     ForEach-Object { Write-Host ("    {0}" -f $_.Name) }
@@ -873,22 +1282,31 @@ if ($Detect) {
     }
 
     $finalDone = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File).Count
-    $finalFail = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_ERROR.txt" -File).Count
-    PhaseEnd 2 "Detection" $start ("Files: $finalDone OK, $finalFail failed (of $tifCount input)")
+    $finalFailRaw = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_ERROR.txt" -File).Count
+    $finalFailNew = [math]::Max(0, $finalFailRaw - $baselineFailures)
+    PhaseEnd 2 "Detection" $start ("Files: $finalDone OK, $finalFailNew failed in this run ($finalFailRaw total _ERROR.txt files; $baselineFailures pre-existing)")
 
     # Per-file audit CSV for detection
     Write-PerFileStatus -Phase 'detection' -ResultsDir $paths['PreCFU'] -OkPattern '*_AQuA2.mat' -FailDir $null
 
-    # Phase-complete marker
-    @"
+    # Failures summary (collect _ERROR.txt files into per-run audit dir)
+    Save-FailuresSummary -Phase 'detection' -ResultsDir $paths['PreCFU']
+
+    # Phase-complete markers: write to BOTH top-level (for resume) AND per-run (for history)
+    $markerContent = @"
 Detection phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
 Files OK:                $finalDone
-Files failed:            $finalFail
+Files failed (this run): $finalFailNew
+Files failed (total _ERROR.txt): $finalFailRaw
 Files attempted:         $tifCount
 Already-done at start:   $alreadyDone
 Detection lanes used:    $Lanes
-Config CSV in effect:    $(if ($ConfigCSV) { $ConfigCSV } else { 'C:\AQuA2\cfg\parameters_for_batch.csv (default)' })
-"@ | Out-File $markerDetect -Encoding UTF8
+Stall warnings issued:   $((Get-Content $stallLogPath -ErrorAction SilentlyContinue | Where-Object { $_ -match 'Auto-skip' }).Count)
+Config CSV in effect:    $(if ($script:resolvedConfigCSV) { $script:resolvedConfigCSV } else { 'C:\AQuA2\cfg\parameters_for_batch.csv (default)' })
+Run audit dir:           $runAuditDir
+"@
+    $markerContent | Out-File $markerDetect -Encoding UTF8
+    $markerContent | Out-File (Join-Path $runAuditDir 'PHASE_detect_COMPLETE.txt') -Encoding UTF8
 }
 
 # ==========================================================
@@ -933,14 +1351,23 @@ if ($CFU) {
     $noWorkersStreak = 0
     $everSawWorkers = $false
     $aborted = $false
+    $cfuLastDetail = Get-Date
+    $cfuLaneStall = @{}
+    $cfuStallLogPath = Join-Path $runAuditDir "stall_log.txt"
+    $cfuBaselineFailures = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue).Count
+    if ($cfuBaselineFailures -gt 0) {
+        Note ("Pre-existing CFU _ERROR.txt files at phase start: {0} (will be ignored)" -f $cfuBaselineFailures)
+    }
 
     while ($true) {
         $workers = @(Get-Process cfu_lane -ErrorAction SilentlyContinue)
         $workerCount = $workers.Count
         if ($workerCount -gt 0) { $everSawWorkers = $true }
 
-        $completed = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue).Count
-        $failures  = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue).Count
+        $rawCompleted = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue).Count
+        $rawFailures  = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue).Count
+        $completed = $rawCompleted
+        $failures  = [math]::Max(0, $rawFailures - $cfuBaselineFailures)
         $free = Get-FreeGB
         $availRAM = Get-AvailRAMGB
         $cfuElapsed = (Get-Date) - $start
@@ -964,6 +1391,89 @@ if ($CFU) {
             -f (Get-Date -Format 'HH:mm:ss'), $completed, $matCount, $pct, $rate, $etaStr, $workerCount, $CFULanes, $availRAM, $free, $failures
         )
 
+        # ===== Per-CFU-lane stall tracking =====
+        $cfuLaneFolders = @(Get-ChildItem $paths['CFU_lanes'] -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^cfu_lane' })
+        foreach ($laneDir in $cfuLaneFolders) {
+            $laneName = $laneDir.Name
+            # CFU input files are _AQuA2.mat (via junctions); count completions for files originating from this lane
+            # Junction-pointed files: check what _res_cfu.mat exists in POST that matches the lane's _AQuA2.mat stems
+            $laneMats = @(Get-ChildItem $laneDir.FullName -File -Filter "*_AQuA2.mat" -Recurse -ErrorAction SilentlyContinue)
+            $laneCompleted = 0
+            foreach ($m in $laneMats) {
+                $stem = ($m.Name -replace '_AQuA2\.mat$','')
+                $expected = Join-Path (Join-Path $paths['POST'] $stem) ("{0}_AQuA2_res_cfu.mat" -f $stem)
+                if (Test-Path $expected) { $laneCompleted++ }
+            }
+            $lanePID = Get-LanePID -LaneFolder $laneDir.FullName -WorkerExeName 'cfu_lane.exe'
+            $laneAlive = ($lanePID -ne $null)
+
+            if (-not $cfuLaneStall.ContainsKey($laneName)) {
+                $cfuLaneStall[$laneName] = @{ lastCount=$laneCompleted; lastChangeAt=Get-Date; warned=$false }
+            } elseif ($laneCompleted -ne $cfuLaneStall[$laneName].lastCount) {
+                $cfuLaneStall[$laneName].lastCount = $laneCompleted
+                $cfuLaneStall[$laneName].lastChangeAt = Get-Date
+                $cfuLaneStall[$laneName].warned = $false
+            } else {
+                if ($laneAlive) {
+                    $stalledMin = ((Get-Date) - $cfuLaneStall[$laneName].lastChangeAt).TotalMinutes
+                    if ($stalledMin -ge $StallWarnMin -and -not $cfuLaneStall[$laneName].warned) {
+                        Write-Host ""
+                        Warn2 ("[CFU STALL WARN] {0} (PID {1}) has made no progress for {2:N1} min" -f $laneName, $lanePID, $stalledMin)
+                        $laneLog = Join-Path $cfuLogDir ("{0}.log" -f $laneName)
+                        $tail = Get-LaneLogTail -LogPath $laneLog -N 5
+                        if ($tail) {
+                            Warn2 "  Last lines from $laneName log:"
+                            foreach ($l in $tail) { Warn2 "    $l" }
+                        }
+                        $cfuLaneStall[$laneName].warned = $true
+                        Write-Host ""
+                    }
+                    if ($stalledMin -ge $StallAutoSkipMin -and $StallPolicy -eq 'auto-skip') {
+                        Write-Host ""
+                        Warn2 ("[CFU STALL AUTO-SKIP] {0} stalled for {1:N1} min -- moving stuck file aside and restarting" -f $laneName, $stalledMin)
+                        # Find stuck file: a _AQuA2.mat under this lane (via junction) without matching _res_cfu.mat
+                        $stuck = $null
+                        foreach ($m in $laneMats) {
+                            $stem = ($m.Name -replace '_AQuA2\.mat$','')
+                            $expected = Join-Path (Join-Path $paths['POST'] $stem) ("{0}_AQuA2_res_cfu.mat" -f $stem)
+                            if (-not (Test-Path $expected)) { $stuck = $m; break }
+                        }
+                        if ($stuck) {
+                            Warn2 ("Stuck CFU file: {0}" -f $stuck.Name)
+                            # Kill the worker
+                            if ($lanePID) {
+                                Stop-Process -Id $lanePID -Force -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 2
+                            }
+                            # For CFU, the lane folder contains junctions to detection output dirs.
+                            # We can't easily "move" a junction-linked file to _stalled/.
+                            # Instead, write a marker file that the user / re-run can use to skip this stem.
+                            $stalledMarker = Join-Path $laneDir.FullName ("_STALLED_{0}.txt" -f $stuck.BaseName)
+                            $markerContent = @"
+Marked stalled at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+Source _AQuA2.mat: $($stuck.FullName)
+Lane: $laneName
+Reason: cfu_lane stalled for $stalledMin min on this file
+NOTE: This is a marker only. To actually skip this file, manually rename or move
+      the source _AQuA2.mat or its parent folder before restarting CFU.
+"@
+                            $markerContent | Out-File $stalledMarker -Encoding UTF8
+                            Add-Content -Path $cfuStallLogPath -Value $markerContent
+
+                            Warn2 "CFU stall handling: worker killed, marker written. NOT restarting CFU worker automatically"
+                            Warn2 "(because CFU lanes use junctions; safer to let user inspect and manually re-run)"
+                            Warn2 ("Marker: {0}" -f $stalledMarker)
+                        } else {
+                            Warn2 ("Could not identify stuck CFU file for {0}; skip not performed." -f $laneName)
+                        }
+                        $cfuLaneStall[$laneName].lastChangeAt = Get-Date
+                        $cfuLaneStall[$laneName].warned = $false
+                        Write-Host ""
+                    }
+                }
+            }
+        }
+
         # Exit conditions
         if ($workerCount -eq 0) { $noWorkersStreak++ } else { $noWorkersStreak = 0 }
         if ($everSawWorkers -and $noWorkersStreak -ge 2) {
@@ -977,6 +1487,34 @@ if ($CFU) {
             break
         }
 
+        if (((Get-Date) - $cfuLastDetail).TotalSeconds -ge $DetailEverySec) {
+            $cfuLastDetail = Get-Date
+            Write-Host ""
+            Write-Host ("  --- CFU detailed snapshot @ {0} ---" -f (Get-Date -Format 'HH:mm:ss'))
+            Write-Host ("  Elapsed: {0:hh\:mm\:ss}" -f $cfuElapsed)
+            Write-Host ("  Throughput: {0:N1} files/min" -f $rate)
+            Write-Host ("  Workers alive: {0}/{1}" -f $workerCount, $CFULanes)
+            if ($cfuLaneStall.Keys.Count -gt 0) {
+                Write-Host "  Per-CFU-lane progress:"
+                foreach ($ln in $cfuLaneStall.Keys | Sort-Object) {
+                    $stallMin = ((Get-Date) - $cfuLaneStall[$ln].lastChangeAt).TotalMinutes
+                    $alive = (Get-LanePID -LaneFolder (Join-Path $paths['CFU_lanes'] $ln) -WorkerExeName 'cfu_lane.exe') -ne $null
+                    $aliveStr = if ($alive) { 'ALIVE' } else { 'gone ' }
+                    Write-Host ("    {0}: {1} done ({2:N1} min since last) [{3}]" -f $ln, $cfuLaneStall[$ln].lastCount, $stallMin, $aliveStr)
+                    $laneLog = Join-Path $cfuLogDir ("{0}.log" -f $ln)
+                    $tail = Get-LaneLogTail -LogPath $laneLog -N 2
+                    foreach ($l in $tail) { Write-Host ("      | $l") }
+                }
+            }
+            if ($failures -gt 0) {
+                Write-Host "  Recent NEW CFU failures (last 3):"
+                Get-ChildItem $paths['POST'] -Recurse -Filter "*_ERROR.txt" -File |
+                    Sort-Object LastWriteTime -Desc | Select-Object -First 3 |
+                    ForEach-Object { Write-Host ("    {0}" -f $_.Name) }
+            }
+            Write-Host ""
+        }
+
         Start-Sleep -Seconds $PollEverySec
     }
 
@@ -986,44 +1524,162 @@ if ($CFU) {
     }
 
     $finalDone = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File).Count
-    $finalFail = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_ERROR.txt" -File).Count
-    PhaseEnd 3 "CFU" $start ("Files: $finalDone OK, $finalFail failed (of $matCount input)")
+    $finalFailRaw = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_ERROR.txt" -File).Count
+    $finalFailNew = [math]::Max(0, $finalFailRaw - $cfuBaselineFailures)
+    PhaseEnd 3 "CFU" $start ("Files: $finalDone OK, $finalFailNew failed in this run")
 
     # Per-file audit CSV for CFU
     Write-PerFileStatus -Phase 'cfu' -ResultsDir $paths['POST'] -OkPattern '*_res_cfu.mat' -FailDir $null
 
-    # Phase-complete marker
-    @"
+    # Failures summary for CFU
+    Save-FailuresSummary -Phase 'cfu' -ResultsDir $paths['POST']
+
+    # Phase-complete markers: dual-write
+    $cfuMarkerContent = @"
 CFU phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
 Files OK:                $finalDone
-Files failed:            $finalFail
+Files failed (this run): $finalFailNew
+Files failed (total _ERROR.txt): $finalFailRaw
 Files attempted:         $matCount
 Already-done at start:   $cfuAlreadyDone
 CFU lanes used:          $CFULanes
-"@ | Out-File $markerCFU -Encoding UTF8
+Run audit dir:           $runAuditDir
+"@
+    $cfuMarkerContent | Out-File $markerCFU -Encoding UTF8
+    $cfuMarkerContent | Out-File (Join-Path $runAuditDir 'PHASE_cfu_COMPLETE.txt') -Encoding UTF8
 }
 
 # ==========================================================
-# Phase 4: S3 upload
+# Phase 4: Consolidate -- flatten outputs into for_upload/
+# ==========================================================
+if ($Consolidate) {
+    Phase 4 ("Consolidate outputs for upload")
+    $start = Get-Date
+
+    $uploadDir = $paths['for_upload']
+    $upTIFFs   = Join-Path $uploadDir 'input_TIFFs'
+    $upPreCFU  = Join-Path $uploadDir 'PreCFU'
+    $upPost    = Join-Path $uploadDir 'PostCFU'
+    foreach ($d in @($upTIFFs, $upPreCFU, $upPost)) {
+        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    }
+
+    # ---- input TIFFs: hardlink from all lane folders into flat dir ----
+    Note "Consolidating input TIFFs (hardlink to avoid disk doubling)..."
+    $allTiffs = @()
+    if (Test-Path $paths['lanes']) {
+        $allTiffs += @(Get-ChildItem $paths['lanes'] -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
+    }
+    Note ("  Found {0} TIFFs in lane folders (excluding _stalled)" -f $allTiffs.Count)
+    $tiffLinked = 0
+    $tiffCopied = 0
+    $tiffSkipped = 0
+    foreach ($t in $allTiffs) {
+        $dest = Join-Path $upTIFFs $t.Name
+        if (Test-Path $dest) {
+            $tiffSkipped++
+            continue
+        }
+        try {
+            New-Item -ItemType HardLink -Path $dest -Value $t.FullName -ErrorAction Stop | Out-Null
+            $tiffLinked++
+        } catch {
+            try {
+                Copy-Item $t.FullName $dest -Force
+                $tiffCopied++
+            } catch {
+                Warn2 ("Failed to consolidate {0}: {1}" -f $t.Name, $_.Exception.Message)
+            }
+        }
+    }
+    Note ("  Hardlinked: {0}, copied: {1}, already present: {2}" -f $tiffLinked, $tiffCopied, $tiffSkipped)
+
+    # ---- PreCFU: copy per-stem subfolders (small _AQuA2.mat files; excludes _lane_logs/_failures) ----
+    Note "Consolidating PreCFU outputs (per-stem subfolders)..."
+    $preStems = @(Get-ChildItem $paths['PreCFU'] -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -notmatch '^_' })  # skip _lane_logs, _failures
+    $preCopied = 0
+    foreach ($stem in $preStems) {
+        $destStem = Join-Path $upPreCFU $stem.Name
+        if (-not (Test-Path $destStem)) { New-Item -ItemType Directory -Path $destStem -Force | Out-Null }
+        $matFiles = @(Get-ChildItem $stem.FullName -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue)
+        foreach ($m in $matFiles) {
+            $destFile = Join-Path $destStem $m.Name
+            if (-not (Test-Path $destFile)) {
+                Copy-Item $m.FullName $destFile -Force
+                $preCopied++
+            }
+        }
+    }
+    Note ("  PreCFU stems consolidated: {0}, .mat files copied: {1}" -f $preStems.Count, $preCopied)
+
+    # ---- PostCFU: flatten into single dir (one .mat per stem, no subfolders) ----
+    Note "Consolidating PostCFU outputs (flat: one file per stem)..."
+    $postMats = @(Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue)
+    $postCopied = 0
+    foreach ($m in $postMats) {
+        $destFile = Join-Path $upPost $m.Name
+        if (-not (Test-Path $destFile)) {
+            Copy-Item $m.FullName $destFile -Force
+            $postCopied++
+        }
+    }
+    Note ("  PostCFU .mat files flattened: {0}" -f $postCopied)
+
+    $finalTiffs   = (Get-ChildItem $upTIFFs  -File).Count
+    $finalPreCFU  = (Get-ChildItem $upPreCFU -Recurse -Filter "*_AQuA2.mat" -File).Count
+    $finalPostCFU = (Get-ChildItem $upPost   -File -Filter "*_res_cfu.mat").Count
+
+    PhaseEnd 4 "Consolidate" $start ("for_upload/: {0} TIFFs, {1} PreCFU .mat, {2} PostCFU .mat" -f $finalTiffs, $finalPreCFU, $finalPostCFU)
+
+    # Phase-complete markers (dual-write)
+    $consolidateMarker = @"
+Consolidate phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+Upload-ready directory:  $uploadDir
+input_TIFFs/ count:      $finalTiffs (hardlinked: $tiffLinked, copied: $tiffCopied)
+PreCFU/ .mat count:      $finalPreCFU
+PostCFU/ .mat count:     $finalPostCFU
+Run audit dir:           $runAuditDir
+"@
+    $consolidateMarker | Out-File $markerConsolidate -Encoding UTF8
+    $consolidateMarker | Out-File (Join-Path $runAuditDir 'PHASE_consolidate_COMPLETE.txt') -Encoding UTF8
+}
+
+# ==========================================================
+# Phase 5: S3 upload
 # ==========================================================
 if ($Upload) {
-    Phase 4 ("S3 upload to {0}" -f $S3Prefix)
-    $start = Get-Date
-    Note "Running dry-run first..."
-    $dry = & aws s3 sync $OutputRoot $S3Prefix --dryrun 2>&1
-    $dryCount = ($dry | Where-Object { $_ -match '^\(dryrun\) upload' }).Count
-    Note ("Dry-run: {0} files would be uploaded." -f $dryCount)
-    Note "Proceeding with real upload..."
-    & aws s3 sync $OutputRoot $S3Prefix
-    PhaseEnd 4 "S3 upload" $start $null
+    if (-not $S3Prefix) {
+        Err2 "Upload enabled but -S3Prefix not specified. Skipping upload."
+    } else {
+        Phase 5 ("S3 upload to {0}" -f $S3Prefix)
+        $start = Get-Date
 
-    # Phase-complete marker
-    @"
+        # Source: prefer for_upload/ if it exists (consolidated), else fall back to project root
+        $uploadSource = if (Test-Path $paths['for_upload']) { $paths['for_upload'] } else { $projectRoot }
+        Note ("Upload source:   {0}" -f $uploadSource)
+        Note ("Upload target:   {0}" -f $S3Prefix)
+
+        Note "Running dry-run first..."
+        $dry = & aws s3 sync $uploadSource $S3Prefix --dryrun 2>&1
+        $dryCount = ($dry | Where-Object { $_ -match '^\(dryrun\) upload' }).Count
+        Note ("Dry-run: {0} files would be uploaded." -f $dryCount)
+
+        Note "Proceeding with real upload..."
+        & aws s3 sync $uploadSource $S3Prefix
+        PhaseEnd 5 "S3 upload" $start $null
+
+        $uploadMarker = @"
 Upload phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
-Source:        $OutputRoot
+Source:        $uploadSource
 Destination:   $S3Prefix
 Files uploaded: $dryCount
-"@ | Out-File $markerUpload -Encoding UTF8
+Run audit dir: $runAuditDir
+"@
+        $uploadMarker | Out-File $markerUpload -Encoding UTF8
+        $uploadMarker | Out-File (Join-Path $runAuditDir 'PHASE_upload_COMPLETE.txt') -Encoding UTF8
+    }
 }
 
 # ==========================================================
@@ -1041,6 +1697,11 @@ $counts = @{
     cfu_fail       = (Get-ChildItem $paths['POST']   -Recurse -Filter '*_ERROR.txt' -File -ErrorAction SilentlyContinue).Count
 }
 
+# Collect stalled files (quarantined detection TIFFs + CFU stall markers)
+$stalledTIFFs   = @(Get-ChildItem $paths['lanes']     -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Directory.FullName -match '\\_stalled(\\|$)' })
+$stalledCFU     = @(Get-ChildItem $paths['CFU_lanes'] -Recurse -File -Filter "_STALLED_*.txt" -ErrorAction SilentlyContinue)
+
 # Write machine-readable + human-readable summaries
 Hdr "Writing audit trail"
 Write-RunManifest -Started $pipelineStart -Completed $completedAt -Counts $counts
@@ -1048,12 +1709,47 @@ Write-RunSummary  -Started $pipelineStart -Completed $completedAt -Counts $count
 
 Hdr "PIPELINE COMPLETE"
 Note ("Total wall-clock:   {0:hh\:mm\:ss}" -f $total)
-Note ("Output root:        {0}" -f $OutputRoot)
+Note ("Project:            {0}" -f $ProjectName)
+Note ("Project root:       {0}" -f $projectRoot)
 Note ("  Detection (.mat): {0} files" -f $counts['detection_ok'])
 Note ("  CFU (_res_cfu):   {0} files" -f $counts['cfu_ok'])
+if ($Consolidate -and (Test-Path $paths['for_upload'])) {
+    $upTiffCount = (Get-ChildItem (Join-Path $paths['for_upload'] 'input_TIFFs') -File -ErrorAction SilentlyContinue).Count
+    $upPostCount = (Get-ChildItem (Join-Path $paths['for_upload'] 'PostCFU') -File -Filter "*_res_cfu.mat" -ErrorAction SilentlyContinue).Count
+    Note ("  for_upload:       {0} TIFFs, {1} PostCFU .mat (ready for S3)" -f $upTiffCount, $upPostCount)
+}
 Note ("Master log:         {0}" -f $masterLog)
-Note ""
-Note "Audit trail saved to $($paths['logs']):"
+
+# ===== Stalled files: PROMINENT visual indication =====
+if ($stalledTIFFs.Count -gt 0 -or $stalledCFU.Count -gt 0) {
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Yellow
+    Write-Host (" STALLED FILES ATTENTION REQUIRED") -ForegroundColor Yellow
+    Write-Host "================================================================" -ForegroundColor Yellow
+    if ($stalledTIFFs.Count -gt 0) {
+        Write-Host ("  Detection stalled and skipped {0} file(s):" -f $stalledTIFFs.Count) -ForegroundColor Yellow
+        foreach ($s in $stalledTIFFs) {
+            Write-Host ("    - {0}" -f $s.FullName) -ForegroundColor Yellow
+        }
+        Write-Host ""
+        Write-Host "  These files were moved to a _stalled subfolder so the lane could continue."
+        Write-Host "  They will NOT appear in detection outputs, PreCFU, PostCFU, or for_upload/."
+        Write-Host "  Inspect, run individually with relaxed parameters, or accept them as known-bad."
+    }
+    if ($stalledCFU.Count -gt 0) {
+        Write-Host ""
+        Write-Host ("  CFU stall markers ({0}):" -f $stalledCFU.Count) -ForegroundColor Yellow
+        foreach ($s in $stalledCFU) {
+            Write-Host ("    - {0}" -f $s.FullName) -ForegroundColor Yellow
+        }
+    }
+    Write-Host ""
+    Write-Host ("  Full stall log: {0}" -f (Join-Path $runAuditDir 'stall_log.txt')) -ForegroundColor Yellow
+    Write-Host "================================================================" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Note "Audit trail saved to $runAuditDir"
 Note "  - RUN_SUMMARY.md                 (human-readable)"
 Note "  - run_manifest.json              (machine-readable)"
 Note "  - parameters_for_batch_USED.csv  (detection parameter CSV in effect)"
@@ -1063,6 +1759,13 @@ if ($CFU) {
 }
 if ($Detect) {
     Note "  - per_file_status_detection.csv  (detection file-by-file)"
+}
+if ($stalledTIFFs.Count -gt 0 -or $stalledCFU.Count -gt 0) {
+    Note "  - stall_log.txt                  (stall events for this run)"
+}
+if ($counts['detection_fail'] -gt 0 -or $counts['cfu_fail'] -gt 0) {
+    Note "  - failures_summary_*.md          (consolidated error reports)"
+    Note "  - failures/                       (copies of per-file _ERROR.txt)"
 }
 
 Write-Host ""
@@ -1074,17 +1777,31 @@ if ($Detect -and -not $CFU) {
     Write-Host ("       Check {0}\<lane>\_failures\ if any" -f $paths['lanes'])
     Write-Host ""
     Write-Host "  2. When ready for CFU:"
-    Write-Host ("       .\Run-Pipeline.ps1 -OutputRoot {0} -Split `$false -Detect `$false -CFU `$true" -f $OutputRoot)
+    Write-Host ("       .\Run-Pipeline.ps1 -OutputRoot {0} -ProjectName {1} -Split `$false -Detect `$false -CFU `$true" -f $OutputRoot, $ProjectName)
     Write-Host ""
 }
-if ($CFU -and -not $Upload) {
+if ($CFU -and -not $Upload -and -not $Consolidate) {
     Write-Host "  1. R analysis:"
     Write-Host "       Open r\AQuA2_CFU_pipeline_v4_27_FOXP1_WT_HET.R in RStudio."
     Write-Host "       Edit frame_interval, filename regex, scope filters (docs/08_OPERATIONS_PLAYBOOK.md sec 1.4)."
     Write-Host "       Run; check pairing_and_parse_audit.csv before trusting results."
     Write-Host ""
-    Write-Host "  2. S3 upload (when ready):"
-    Write-Host ("       .\Run-Pipeline.ps1 -OutputRoot {0} -Split `$false -Detect `$false -CFU `$false -Upload `$true -S3Prefix s3://..." -f $OutputRoot)
+    Write-Host "  2. Consolidate outputs into flat structure for S3:"
+    Write-Host ("       .\Run-Pipeline.ps1 -OutputRoot {0} -ProjectName {1} -Split `$false -Detect `$false -CFU `$false -Consolidate `$true" -f $OutputRoot, $ProjectName)
+    Write-Host ""
+    Write-Host "  3. Or consolidate+upload in one go:"
+    Write-Host ("       .\Run-Pipeline.ps1 -OutputRoot {0} -ProjectName {1} -Split `$false -Detect `$false -CFU `$false -Upload `$true -S3Prefix s3://..." -f $OutputRoot, $ProjectName)
+    Write-Host ""
+}
+if ($Consolidate -and -not $Upload) {
+    Write-Host "  Consolidated outputs ready at:" -ForegroundColor Green
+    Write-Host ("    {0}" -f $paths['for_upload'])
+    Write-Host "      input_TIFFs/   (flat: all source TIFFs)"
+    Write-Host "      PreCFU/        (per-stem subfolders with _AQuA2.mat)"
+    Write-Host "      PostCFU/       (flat: one _res_cfu.mat per stem)"
+    Write-Host ""
+    Write-Host "  To upload to S3:"
+    Write-Host ("       .\Run-Pipeline.ps1 -OutputRoot {0} -ProjectName {1} -Split `$false -Detect `$false -CFU `$false -Consolidate `$false -Upload `$true -S3Prefix s3://..." -f $OutputRoot, $ProjectName)
     Write-Host ""
 }
 if ($Upload) {
