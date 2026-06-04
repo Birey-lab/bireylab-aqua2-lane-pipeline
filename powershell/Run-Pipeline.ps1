@@ -1,16 +1,23 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.7.2 (2026-06-04).
+    Version 0.7.3 (2026-06-04).
 
 .DESCRIPTION
-    v0.7.2 fix: PreCFU consolidation now copies ALL accessory files per stem
-    (_AQuA2.mat, _AQuA2_Ch1.csv, _AQuA2_Ch1_curves.xlsx, _AQuA2_Movie.tif,
-    and any other per-recording outputs), not just the .mat. Previous
-    v0.7.1 only grabbed the .mat which left CSV/xlsx/movie files behind.
+    v0.7.3 fix: Show-CSVValues function rewritten to use Import-Csv on the
+    actual parameters_for_batch.csv format (multi-column: Name, Variable,
+    Type, File1..File12). Previous regex-based parser was broken and
+    silently produced garbage. Now properly displays Variable column as
+    parameter names and File1 column as values. detectGlo gets a
+    prominent ON/OFF visual marker because it controls whether
+    _Glo_*.xlsx output files are produced.
 
-    v0.7.1 fix: PreCFU consolidation uses per-stem subfolders (not per-lane);
-    PreCFU and PostCFU use hardlinks instead of copies.
+    v0.7.2 fix: PreCFU consolidation gathers ALL accessory files per stem
+    (_AQuA2.mat, _Ch1.csv, _Ch1_curves.xlsx, _Movie.tif, _Glo_*.xlsx) via
+    "<stem>*" filter, not just the .mat.
+
+    v0.7.1 fix: PreCFU per-stem subfolders (not per-lane); PreCFU and
+    PostCFU use hardlinks not copies.
 
 .DESCRIPTION
     Runs any subset of the pipeline phases on a folder of TIFFs:
@@ -582,47 +589,93 @@ These are compiled into ``cfu_lane.exe``. To change, edit ``C:\AQuA2\cfu_lane.m`
 # ==========================================================
 # ConfigCSV resolution + parsing helpers
 # ==========================================================
+function Show-CSVValues {
+    # Print key parameter values from parameters_for_batch.csv for user sanity-check
+    # before pressing Y.
+    #
+    # The CSV format is:
+    #   Name,Variable,Type,File1,File2,File3,...,File12
+    #   Spatial smoothing level,smoXY,preprocessing,0.5,0.5,0.5,...
+    #   Whether detect global signals,detectGlo,glo,0,0,0,...
+    #
+    # We display the Variable name and the File1 (first preset) value, with
+    # prominent ON/OFF markers for critical flags (especially detectGlo
+    # because it controls whether _Glo_*.xlsx output files are produced).
+    param([string]$CSVPath, [string]$Label = 'Parameters in effect')
+
+    if (-not (Test-Path $CSVPath)) {
+        Note ("  (could not find {0})" -f $CSVPath)
+        return
+    }
+
+    try {
+        $rows = @(Import-Csv $CSVPath -ErrorAction Stop)
+    } catch {
+        Note ("  (could not parse {0} as CSV: {1})" -f $CSVPath, $_.Exception.Message)
+        return
+    }
+    if ($rows.Count -eq 0) {
+        Note "  (CSV is empty or has no data rows)"
+        return
+    }
+
+    Write-Host "  ==== $Label ===="
+    Write-Host ("  Source:   {0}" -f $CSVPath)
+    Write-Host ("  Modified: {0}" -f (Get-Item $CSVPath).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
+    Write-Host "  Key parameters (showing File1 / first preset column):"
+
+    # Critical parameters to surface in the display.
+    # detectGlo gets a prominent marker because it controls whether
+    # _Glo_Ch1.xlsx and _Glo_Ch1_curves.xlsx output files are produced.
+    $interesting = @(
+        'frameRate', 'spatialRes',
+        'thrARScl', 'minDur', 'minSize', 'maxSize', 'circularityThr',
+        'smoXY', 'sourceSensitivity', 'whetherExtend',
+        'detectGlo', 'gloDur',
+        'ignoreTau', 'propMetric', 'networkFeatures'
+    )
+
+    $shown = 0
+    foreach ($row in $rows) {
+        if (-not $row.Variable) { continue }
+        $varName = $row.Variable.Trim()
+        if (-not $varName) { continue }
+        if ($interesting -notcontains $varName) { continue }
+
+        $value = if ($row.File1) { $row.File1.Trim() } else { '(empty)' }
+
+        $marker = ''
+        $color = 'White'
+        if ($varName -eq 'detectGlo') {
+            if ($value -eq '1') {
+                $marker = '   <-- GLOBAL SIGNAL DETECTION: ON  (will produce _Glo_*.xlsx files)'
+                $color = 'Green'
+            } else {
+                $marker = '   <-- GLOBAL SIGNAL DETECTION: OFF (no _Glo_*.xlsx files)'
+                $color = 'Yellow'
+            }
+        }
+        $line = "    {0,-22} = {1}{2}" -f $varName, $value, $marker
+        Write-Host $line -ForegroundColor $color
+        $shown++
+    }
+    Write-Host ("  ({0} of {1} total rows shown; full CSV archived to per-run audit dir)" -f $shown, $rows.Count)
+}
+
 function Get-CSVKeyValues {
-    # Parse parameters_for_batch.csv and return key values for display.
-    # Format: rows like "frameRate,19.08" or "maxSize,50000"
+    # Kept for backward compat; returns ordered dict of Variable=>File1 value
     param([string]$CSVPath)
     $values = [ordered]@{}
     if (-not (Test-Path $CSVPath)) { return $values }
     try {
-        $lines = Get-Content $CSVPath -ErrorAction Stop
-        foreach ($line in $lines) {
-            if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,=:\t]\s*(.+?)\s*$') {
-                $key = $Matches[1]
-                $val = $Matches[2].Trim().Trim('"').Trim("'")
-                $values[$key] = $val
+        $rows = @(Import-Csv $CSVPath -ErrorAction Stop)
+        foreach ($r in $rows) {
+            if ($r.Variable) {
+                $values[$r.Variable.Trim()] = if ($r.File1) { $r.File1.Trim() } else { '' }
             }
         }
-    } catch {
-        # Parse failure; return partial
-    }
+    } catch { }
     return $values
-}
-
-function Show-CSVValues {
-    # Print key parameter values from a CSV for user sanity-check.
-    param([string]$CSVPath, [string]$Label = 'Parameters in effect')
-    $vals = Get-CSVKeyValues -CSVPath $CSVPath
-    if ($vals.Count -eq 0) {
-        Note "  (could not parse $CSVPath; will use as-is)"
-        return
-    }
-    Write-Host "  ==== $Label ===="
-    Write-Host ("  Source: {0}" -f $CSVPath)
-    Write-Host ("  Modified: {0}" -f (Get-Item $CSVPath).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
-    Write-Host "  Key values:"
-    # Highlight common AQuA2 parameters of interest
-    $interesting = @('frameRate','spatialRes','maxSize','minSize','thrARScl','sourceSensitivity','smoXY','smoXY1','smoT')
-    foreach ($k in $interesting) {
-        if ($vals.Contains($k)) {
-            Write-Host ("    {0,-22} = {1}" -f $k, $vals[$k])
-        }
-    }
-    Write-Host ("  ({0} total parameter rows)" -f $vals.Count)
 }
 
 function Resolve-ConfigCSV {
