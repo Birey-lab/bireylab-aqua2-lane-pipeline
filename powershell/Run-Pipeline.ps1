@@ -445,6 +445,25 @@ foreach ($e in $workerExes.GetEnumerator()) {
     }
 }
 
+# --- 2.5. No leftover live workers from a previous crashed run ---
+$liveWorkers = Get-Process aqua_lane, cfu_lane -ErrorAction SilentlyContinue
+if ($liveWorkers) {
+    Err2 "Existing pipeline workers are already running on this instance:"
+    foreach ($w in $liveWorkers) {
+        Err2 ("  PID {0,6}  {1}  (started: {2})" -f $w.Id, $w.Name, $w.StartTime.ToString('HH:mm:ss'))
+    }
+    Err2 "These may be orphans from a previous crashed orchestrator run."
+    Err2 "Options:"
+    Err2 "  (a) Wait for them to finish (they continue writing to their existing output paths),"
+    Err2 "      then re-run; the orchestrator's per-file resume guard will skip what they did."
+    Err2 "  (b) Kill them and start fresh:"
+    Err2 "      Get-Process aqua_lane,cfu_lane | Stop-Process -Force"
+    Err2 "Refusing to launch new workers on top of existing ones."
+    $checksFailed++
+} else {
+    OK2 "no leftover workers running (clean slate)"
+}
+
 # --- 3. Input TIFFs ---
 $inputCount = 0
 $inputSizeGB = 0
@@ -567,18 +586,44 @@ if ($checksFailed -gt 0) {
 # ==========================================================
 Hdr "Plan summary"
 
+# Phase-complete markers (written at end of each successful phase)
+$markerSplit  = Join-Path $paths['logs'] 'PHASE_split_COMPLETE.txt'
+$markerDetect = Join-Path $paths['logs'] 'PHASE_detect_COMPLETE.txt'
+$markerCFU    = Join-Path $paths['logs'] 'PHASE_cfu_COMPLETE.txt'
+$markerUpload = Join-Path $paths['logs'] 'PHASE_upload_COMPLETE.txt'
+
 $phaseList = @(
-    @{ name='Split TIFFs into lanes';        on=$Split  },
-    @{ name='Detection (aqua_lane.exe)';     on=$Detect },
-    @{ name='CFU (build junctions + run)';   on=$CFU    },
-    @{ name='S3 upload';                     on=$Upload }
+    @{ name='Split TIFFs into lanes';        on=$Split;  marker=$markerSplit  },
+    @{ name='Detection (aqua_lane.exe)';     on=$Detect; marker=$markerDetect },
+    @{ name='CFU (build junctions + run)';   on=$CFU;    marker=$markerCFU    },
+    @{ name='S3 upload';                     on=$Upload; marker=$markerUpload }
 )
 foreach ($p in $phaseList) {
     $sym = if ($p.on) { '[X]' } else { '[ ]' }
     $col = if ($p.on) { 'Green' } else { 'DarkGray' }
-    Write-Host ("  {0} {1}" -f $sym, $p.name) -ForegroundColor $col
+    $suffix = ''
+    if ($p.on -and (Test-Path $p.marker)) {
+        $when = (Get-Item $p.marker).LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+        $suffix = "  (PREVIOUSLY COMPLETED $when -- will re-run; per-file resume guard skips done files)"
+        $col = 'Yellow'
+    }
+    Write-Host ("  {0} {1}{2}" -f $sym, $p.name, $suffix) -ForegroundColor $col
 }
 Write-Host ""
+
+# Resume counts: how many files are already done in each output dir?
+$existingDetect = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue).Count
+$existingCFU    = (Get-ChildItem $paths['POST']   -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue).Count
+if ($existingDetect -gt 0 -or $existingCFU -gt 0) {
+    Note "Resume context (files already in output folders from previous run):"
+    if ($existingDetect -gt 0) {
+        Note ("  Detection .mat files:  {0}  (these will be skipped by per-file resume guard)" -f $existingDetect)
+    }
+    if ($existingCFU -gt 0) {
+        Note ("  CFU .mat files:        {0}  (these will be skipped by per-file resume guard)" -f $existingCFU)
+    }
+    Write-Host ""
+}
 
 if ($Lanes -le 0) {
     Note "Detection lanes:    will auto-size (probe largest input TIFF)"
@@ -660,6 +705,14 @@ if ($Split) {
     $laneFolders = Get-ChildItem $paths['lanes'] -Directory | Where-Object { $_.Name -match '^lane' }
     Note ("Created {0} lane folders" -f $laneFolders.Count)
     PhaseEnd 1 "Split" $start $null
+
+    # Phase-complete marker
+    @"
+Split phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+Lane folders created: $($laneFolders.Count)
+Input TIFFs:          $inputCount
+Lane root:            $($paths['lanes'])
+"@ | Out-File $markerSplit -Encoding UTF8
 }
 
 # ==========================================================
@@ -686,7 +739,16 @@ if ($Detect) {
     $launcher = Join-Path $ScriptsDir 'Launch-Lanes-Exe.ps1'
 
     $tifCount = (Get-ChildItem -Path $paths['lanes'] -Recurse -Include *.tif,*.tiff -File).Count
+    $alreadyDone = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue).Count
     Note ("Total TIFFs across lanes: {0}" -f $tifCount)
+    if ($alreadyDone -gt 0) {
+        $remaining = $tifCount - $alreadyDone
+        Note ("Already processed (resume): {0} files" -f $alreadyDone)
+        Note ("Remaining to process:       {0} files" -f $remaining)
+        Note "(workers' per-file resume guard will skip the already-done ones)"
+    } else {
+        Note "Fresh start (no previous detection outputs found)."
+    }
     Note "Launching detection in background job..."
 
     $job = Start-Job -ScriptBlock {
@@ -769,6 +831,17 @@ if ($Detect) {
 
     # Per-file audit CSV for detection
     Write-PerFileStatus -Phase 'detection' -ResultsDir $paths['PreCFU'] -OkPattern '*_AQuA2.mat' -FailDir $null
+
+    # Phase-complete marker
+    @"
+Detection phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+Files OK:                $finalDone
+Files failed:            $finalFail
+Files attempted:         $tifCount
+Already-done at start:   $alreadyDone
+Detection lanes used:    $Lanes
+Config CSV in effect:    $(if ($ConfigCSV) { $ConfigCSV } else { 'C:\AQuA2\cfg\parameters_for_batch.csv (default)' })
+"@ | Out-File $markerDetect -Encoding UTF8
 }
 
 # ==========================================================
@@ -793,6 +866,15 @@ if ($CFU) {
     # --- 3b: clustering ---
     $cfuLauncher = Join-Path $ScriptsDir 'Launch-CFU-Lanes.ps1'
     $cfuLogDir = Join-Path $paths['CFU_lanes'] '_logs'
+    $cfuAlreadyDone = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue).Count
+    if ($cfuAlreadyDone -gt 0) {
+        $cfuRemaining = $matCount - $cfuAlreadyDone
+        Note ("Already CFU-processed (resume): {0} files" -f $cfuAlreadyDone)
+        Note ("Remaining to process:           {0} files" -f $cfuRemaining)
+        Note "(workers' per-file resume guard will skip the already-done ones)"
+    } else {
+        Note "Fresh CFU start (no previous CFU outputs found)."
+    }
     Note "Launching CFU in background job..."
 
     $job = Start-Job -ScriptBlock {
@@ -836,6 +918,16 @@ if ($CFU) {
 
     # Per-file audit CSV for CFU
     Write-PerFileStatus -Phase 'cfu' -ResultsDir $paths['POST'] -OkPattern '*_res_cfu.mat' -FailDir $null
+
+    # Phase-complete marker
+    @"
+CFU phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+Files OK:                $finalDone
+Files failed:            $finalFail
+Files attempted:         $matCount
+Already-done at start:   $cfuAlreadyDone
+CFU lanes used:          $CFULanes
+"@ | Out-File $markerCFU -Encoding UTF8
 }
 
 # ==========================================================
@@ -851,6 +943,14 @@ if ($Upload) {
     Note "Proceeding with real upload..."
     & aws s3 sync $OutputRoot $S3Prefix
     PhaseEnd 4 "S3 upload" $start $null
+
+    # Phase-complete marker
+    @"
+Upload phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+Source:        $OutputRoot
+Destination:   $S3Prefix
+Files uploaded: $dryCount
+"@ | Out-File $markerUpload -Encoding UTF8
 }
 
 # ==========================================================

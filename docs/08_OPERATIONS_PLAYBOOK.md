@@ -279,6 +279,62 @@ For large datasets (TBs), use `s5cmd --numworkers 32` instead — 10-30× faster
 
 ## 4. Recovery: when things go sideways
 
+### Resume after a crash (the orchestrator died mid-run)
+
+The pipeline is resume-safe at the per-file level. The workers themselves (`aqua_lane.exe`, `cfu_lane.exe`) skip any file whose output already exists, so re-running a phase just processes the not-yet-done files.
+
+**Step 1: check for orphaned workers from the previous run.**
+
+```powershell
+Get-Process aqua_lane,cfu_lane -ErrorAction SilentlyContinue
+```
+
+If anything is listed, you have a choice:
+
+- **Let them finish.** They continue writing outputs to the right paths. When they're done, re-run the orchestrator and it'll see the completed files and skip them. Best when the workers are making clear progress.
+- **Kill them and start fresh.** Use:
+   ```powershell
+   Get-Process aqua_lane,cfu_lane | Stop-Process -Force
+   ```
+   Then re-run the orchestrator. The half-finished file (if any) gets re-attempted.
+
+`Run-Pipeline.ps1` will REFUSE to start if it detects live workers. This is intentional — it prevents you from launching new workers on top of orphans (race conditions, log overwrites, corrupted outputs).
+
+**Step 2: re-run the orchestrator with appropriate toggles.**
+
+If the crash was during detection, and split had completed:
+```powershell
+.\Run-Pipeline.ps1 -OutputRoot C:\NewDS -Split $false -Detect $true
+```
+
+The orchestrator will print at start of Phase 2:
+```
+Already processed (resume): 850 files
+Remaining to process:       341 files
+(workers' per-file resume guard will skip the already-done ones)
+```
+
+Same idea for CFU crashes — re-run with `-CFU $true` and the existing `_res_cfu.mat` files get skipped.
+
+### Phase-complete markers
+
+`Run-Pipeline.ps1` writes a marker file to `<OutputRoot>/_logs/` after each successful phase:
+
+- `PHASE_split_COMPLETE.txt`
+- `PHASE_detect_COMPLETE.txt`
+- `PHASE_cfu_COMPLETE.txt`
+- `PHASE_upload_COMPLETE.txt`
+
+If you re-run with a phase toggle ON and its marker exists, the plan summary will warn you:
+
+```
+  [X] Detection (aqua_lane.exe)  (PREVIOUSLY COMPLETED 2026-06-04 14:30 -- will re-run; per-file resume guard skips done files)
+```
+
+So you can decide at the confirm prompt whether to proceed (re-runs harmlessly thanks to resume guard) or back out and re-launch with the toggle off.
+
+### Other failure modes
+
 ### A single file failed during detection
 
 `aqua_lane.exe` has per-file try/catch. The failed file is logged in the lane log with a stack trace. **Re-launching the same lane picks up un-completed files** thanks to the resume-on-existing-`_AQuA2.mat`-guard.
