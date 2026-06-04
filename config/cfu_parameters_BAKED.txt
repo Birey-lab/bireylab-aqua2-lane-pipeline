@@ -1,0 +1,49 @@
+# CFU Clustering Parameters — BAKED INTO cfu_lane.exe
+# ====================================================
+#
+# These values are HARDCODED inside cfu_lane.m and compiled into
+# cfu_lane.exe via the MATLAB Compiler. They are NOT read from a
+# config file at runtime — to change them, you must edit cfu_lane.m,
+# recompile, AND update this file.
+#
+# Source-of-truth:  C:\AQuA2\cfu_lane.m  (this file is a copy / pointer)
+# Compiled into:    C:\AQuA2\compiled\cfu_lane.exe
+# Last verified:    2026-06-04 (AMI baseline)
+#
+# ============================================================
+# CORE CLUSTERING THRESHOLDS
+# ============================================================
+overlapThr   = 0.5      # Spatial overlap threshold for grouping events into the same CFU candidate
+minNumEvt    = 3        # Minimum number of events per CFU candidate (below this, candidate is dropped)
+maxDist      = 10       # Maximum spatial distance (in pixels) between events to consider them co-localized
+pValueThr    = 1e-5     # Statistical significance threshold for keeping a CFU candidate
+cfuNumThr    = 3        # Minimum number of events required for a FINAL CFU to be retained
+#
+# ============================================================
+# BEHAVIOR FLAGS (also baked)
+# ============================================================
+whetherUpdateRes        = true    # Bake CFU fields into the original _AQuA2.mat (atomic temp+rename)
+whetherOutputCFURes     = true    # Also write standalone _res_cfu.mat to the POST/ folder
+parpool_AutoCreate      = false   # Don't spawn a parallel pool per worker (we parallelize at file/lane level)
+resume_guard            = true    # Skip a file when its _res_cfu.mat already exists in pOut
+per_file_try_catch      = true    # On error, write _failures/<name>_ERROR.txt and continue with next file
+#
+# ============================================================
+# CHANNEL HANDLING
+# ============================================================
+# single/dual channel is AUTO-DETECTED from res.opts.singleChannel inside each _AQuA2.mat.
+# No user override.
+#
+# ============================================================
+# HOW TO CHANGE
+# ============================================================
+# 1. Edit C:\AQuA2\cfu_lane.m (find the cfuOpt struct assignment block)
+# 2. Open MATLAB R2026a (must sign in to Emory once per session)
+# 3. cd C:\AQuA2
+# 4. addpath(genpath('C:\AQuA2'));
+# 5. mcc('-m','cfu_lane.m','-d','C:\AQuA2\compiled','-o','cfu_lane','-a','C:\AQuA2\src');
+# 6. UPDATE THIS FILE to reflect the new values.
+# 7. Re-run the pipeline; new CFU outputs will reflect the new thresholds.
+#
+# If you change values without updating this file, future audit trails
+# will be misleading.

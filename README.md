@@ -22,6 +22,7 @@ The pipeline takes raw multi-frame TIFFs (calcium fluorescence movies), splits t
 5. [`docs/05_DOWNSTREAM_R_ANALYSIS.md`](docs/05_DOWNSTREAM_R_ANALYSIS.md) — R script integration
 6. [`docs/06_PITFALLS_AND_RECOVERY.md`](docs/06_PITFALLS_AND_RECOVERY.md) — read at least once before any major run
 7. [`docs/07_TEARDOWN_CHECKLIST.md`](docs/07_TEARDOWN_CHECKLIST.md) — what to grab before deleting an instance
+8. [`docs/08_OPERATIONS_PLAYBOOK.md`](docs/08_OPERATIONS_PLAYBOOK.md) — pre-flight, smoke test, step-by-step gotchas, recovery. **Read this before any new dataset.**
 
 **Case studies** showing what real runs looked like, with concrete numbers and decisions: [`docs/case-studies/`](docs/case-studies/). These are useful for grounding the generic docs in real examples.
 
