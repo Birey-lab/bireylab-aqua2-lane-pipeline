@@ -1,23 +1,33 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.7.3 (2026-06-04).
+    Version 0.7.4 (2026-06-04).
 
 .DESCRIPTION
-    v0.7.3 fix: Show-CSVValues function rewritten to use Import-Csv on the
-    actual parameters_for_batch.csv format (multi-column: Name, Variable,
-    Type, File1..File12). Previous regex-based parser was broken and
-    silently produced garbage. Now properly displays Variable column as
-    parameter names and File1 column as values. detectGlo gets a
-    prominent ON/OFF visual marker because it controls whether
-    _Glo_*.xlsx output files are produced.
+    v0.7.4 fixes (CRITICAL):
+    - Per-lane completion counter was checking wrong path. The worker
+      writes outputs to PreCFU/laneNN_results/<stem>_AQuA2.mat, but the
+      orchestrator was looking at PreCFU/<stem>/<stem>_AQuA2.mat. Result:
+      counter was always 0 even when workers were completing successfully,
+      so stall detection fired false positives at 15 min for every lane.
+      AT 60 MIN: Find-StuckFile would have classified completed TIFFs as
+      stuck and Invoke-AutoSkipFile would have quarantined valid data
+      AND restarted already-exited workers. Fixed by recursive name-match
+      against actual worker output paths.
+    - Three-stage stall thresholds (per user request):
+        Stage 1 WARN      at -StallWarnMin     (default 30 min)
+        Stage 2 ESCALATE  at -StallEscalateMin (default 45 min, red banner)
+        Stage 3 AUTO-SKIP at -StallAutoSkipMin (default 60 min)
+    - Same fixes applied to CFU phase stall tracking.
 
-    v0.7.2 fix: PreCFU consolidation gathers ALL accessory files per stem
-    (_AQuA2.mat, _Ch1.csv, _Ch1_curves.xlsx, _Movie.tif, _Glo_*.xlsx) via
-    "<stem>*" filter, not just the .mat.
+    v0.7.3 fix: Show-CSVValues uses Import-Csv on actual multi-column
+    parameters_for_batch.csv format; detectGlo gets prominent ON/OFF
+    visual marker.
 
-    v0.7.1 fix: PreCFU per-stem subfolders (not per-lane); PreCFU and
-    PostCFU use hardlinks not copies.
+    v0.7.2 fix: PreCFU consolidation gathers ALL accessory files per
+    stem via "<stem>*" filter.
+
+    v0.7.1 fix: PreCFU per-stem subfolders + hardlinks not copies.
 
 .DESCRIPTION
     Runs any subset of the pipeline phases on a folder of TIFFs:
@@ -172,8 +182,12 @@ param(
     # --- Run identification ---
     [string]$RunName = '',
 
-    # --- Stall detection ---
-    [int]$StallWarnMin = 15,
+    # --- Stall detection (three-stage) ---
+    # At StallWarnMin: print yellow [STALL WARN] with lane log tail (first heads-up)
+    # At StallEscalateMin: print red [STALL ESCALATED] with louder formatting (still no destructive action; gives you a chance to manually intervene)
+    # At StallAutoSkipMin: auto-skip the stuck file (if policy = auto-skip), restart lane worker
+    [int]$StallWarnMin = 30,
+    [int]$StallEscalateMin = 45,
     [int]$StallAutoSkipMin = 60,
     [ValidateSet('warn-only','auto-skip')]
     [string]$StallPolicy = 'auto-skip',
@@ -256,14 +270,18 @@ function Get-LanePID {
 }
 
 function Find-StuckFile {
-    # Given a lane folder and a results root, find the .tif that's most likely the stuck file:
-    # one that exists in the lane folder but has no matching _AQuA2.mat in the results root.
+    # Given a lane folder and a results root, find the .tif that's most likely the stuck file.
+    # A TIFF is "stuck" if no corresponding _AQuA2.mat exists ANYWHERE under the results root.
+    # We search recursively because the worker writes to subfolders like lane01_results/.
     param([string]$LaneFolder, [string]$ResultsRoot)
-    $laneTiffs = @(Get-ChildItem $LaneFolder -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue)
+    $laneTiffs = @(Get-ChildItem $LaneFolder -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
     foreach ($t in $laneTiffs) {
         $stem = [System.IO.Path]::GetFileNameWithoutExtension($t.Name)
-        $expectedMat = Join-Path (Join-Path $ResultsRoot $stem) ("{0}_AQuA2.mat" -f $stem)
-        if (-not (Test-Path $expectedMat)) {
+        # Search ANYWHERE under ResultsRoot for "<stem>_AQuA2.mat"
+        $foundMat = Get-ChildItem $ResultsRoot -Recurse -Filter "${stem}_AQuA2.mat" -File -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+        if (-not $foundMat) {
             return $t  # FileInfo of stuck file
         }
     }
@@ -1012,13 +1030,14 @@ if ($estNeed -gt 0) {
 # Stall detection info
 if ($Detect -or $CFU) {
     Write-Host ""
-    Note "Stall detection:"
-    Note ("  Warn after:     {0} min with no progress" -f $StallWarnMin)
-    Note ("  Auto-action:    after {0} min (policy: {1})" -f $StallAutoSkipMin, $StallPolicy)
+    Note "Stall detection (three-stage):"
+    Note ("  Stage 1 -- WARN          at {0} min: yellow warning + log tail" -f $StallWarnMin)
+    Note ("  Stage 2 -- ESCALATE      at {0} min: red banner + longer log tail (no destructive action yet)" -f $StallEscalateMin)
+    Note ("  Stage 3 -- AUTO-ACTION   at {0} min (policy: {1})" -f $StallAutoSkipMin, $StallPolicy)
     if ($StallPolicy -eq 'auto-skip') {
-        Note "  When triggered: move the stuck file to <lane>\_stalled\, kill+restart worker, continue lane"
+        Note "  When Stage 3 fires: move stuck file to <lane>\_stalled\, kill+restart worker, continue lane"
     } else {
-        Note "  When triggered: warn only; user must intervene manually"
+        Note "  When Stage 3 fires: warn only; user must intervene manually"
     }
 }
 
@@ -1216,31 +1235,41 @@ if ($Detect) {
 
         # ===== Per-lane stall tracking =====
         $laneFolders = @(Get-ChildItem $paths['lanes'] -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^lane' })
+        # Cache the list of completed mat files once per polling iteration (avoids N*M lookups)
+        $allCompletedMats = @{}
+        Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $allCompletedMats[($_.Name -replace '_AQuA2\.mat$','')] = $true
+        }
+
         foreach ($laneDir in $laneFolders) {
             $laneName = $laneDir.Name
-            # Count completed _AQuA2.mat for files originating from this lane
-            $expectedTiffs = @(Get-ChildItem $laneDir.FullName -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue)
+            # Count completed _AQuA2.mat for TIFFs originating from this lane.
+            # Worker writes output to PreCFU/laneNN_results/<stem>_AQuA2.mat,
+            # so we search by stem (filename match) anywhere under PreCFU rather than
+            # guessing the output directory.
+            $expectedTiffs = @(Get-ChildItem $laneDir.FullName -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+                               Where-Object { $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
             $laneCompleted = 0
             foreach ($t in $expectedTiffs) {
                 $stem = [System.IO.Path]::GetFileNameWithoutExtension($t.Name)
-                $expectedMat = Join-Path (Join-Path $paths['PreCFU'] $stem) ("{0}_AQuA2.mat" -f $stem)
-                if (Test-Path $expectedMat) { $laneCompleted++ }
+                if ($allCompletedMats.ContainsKey($stem)) { $laneCompleted++ }
             }
             # Check if this lane's worker is still alive
             $lanePID = Get-LanePID -LaneFolder $laneDir.FullName -WorkerExeName 'aqua_lane.exe'
             $laneAlive = ($lanePID -ne $null)
 
             if (-not $laneStall.ContainsKey($laneName)) {
-                $laneStall[$laneName] = @{ lastCount=$laneCompleted; lastChangeAt=Get-Date; warned=$false }
+                $laneStall[$laneName] = @{ lastCount=$laneCompleted; lastChangeAt=Get-Date; warned=$false; escalated=$false }
             } elseif ($laneCompleted -ne $laneStall[$laneName].lastCount) {
                 $laneStall[$laneName].lastCount = $laneCompleted
                 $laneStall[$laneName].lastChangeAt = Get-Date
                 $laneStall[$laneName].warned = $false
+                $laneStall[$laneName].escalated = $false
             } else {
                 # No progress in this lane; if worker is still alive, check stall thresholds
                 if ($laneAlive) {
                     $stalledMin = ((Get-Date) - $laneStall[$laneName].lastChangeAt).TotalMinutes
-                    # Warn threshold
+                    # Stage 1: warn threshold (yellow, first heads-up)
                     if ($stalledMin -ge $StallWarnMin -and -not $laneStall[$laneName].warned) {
                         Write-Host ""
                         Warn2 ("[STALL WARN] {0} (PID {1}) has made no progress for {2:N1} min" -f $laneName, $lanePID, $stalledMin)
@@ -1250,10 +1279,32 @@ if ($Detect) {
                             Warn2 "  Last lines from $laneName log:"
                             foreach ($l in $tail) { Warn2 "    $l" }
                         }
+                        Warn2 ("  Auto-skip will fire at {0} min; manual abort: Stop-Process -Id {1} -Force" -f $StallAutoSkipMin, $lanePID)
                         $laneStall[$laneName].warned = $true
+                        Add-Content -Path $stallLogPath -Value ("[{0}] STALL WARN: {1} (PID {2}) no progress for {3:N1} min" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $laneName, $lanePID, $stalledMin)
                         Write-Host ""
                     }
-                    # Auto-skip threshold
+                    # Stage 2: escalated warning (red, louder formatting; still no destructive action)
+                    if ($stalledMin -ge $StallEscalateMin -and -not $laneStall[$laneName].escalated) {
+                        Write-Host ""
+                        Write-Host "================================================================" -ForegroundColor Red
+                        Write-Host (" [STALL ESCALATED] {0} (PID {1}) stalled {2:N1} min" -f $laneName, $lanePID, $stalledMin) -ForegroundColor Red
+                        Write-Host "================================================================" -ForegroundColor Red
+                        $laneLog = Join-Path $laneLogDir ("{0}.log" -f $laneName)
+                        $tail = Get-LaneLogTail -LogPath $laneLog -N 10
+                        if ($tail) {
+                            Write-Host "  Last 10 lines from $laneName log:" -ForegroundColor Red
+                            foreach ($l in $tail) { Write-Host ("    $l") -ForegroundColor Red }
+                        }
+                        $minsToAutoSkip = [math]::Round($StallAutoSkipMin - $stalledMin, 1)
+                        Write-Host ("  Auto-skip will fire in {0} more minutes (at {1} min total)" -f $minsToAutoSkip, $StallAutoSkipMin) -ForegroundColor Red
+                        Write-Host "  To intervene manually:" -ForegroundColor Red
+                        Write-Host ("    Stop-Process -Id {0} -Force" -f $lanePID) -ForegroundColor Red
+                        Write-Host ""
+                        $laneStall[$laneName].escalated = $true
+                        Add-Content -Path $stallLogPath -Value ("[{0}] STALL ESCALATED: {1} (PID {2}) no progress for {3:N1} min" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $laneName, $lanePID, $stalledMin)
+                    }
+                    # Stage 3: auto-skip threshold
                     if ($stalledMin -ge $StallAutoSkipMin -and $StallPolicy -eq 'auto-skip') {
                         Write-Host ""
                         Warn2 ("[STALL AUTO-SKIP] {0} stalled for {1:N1} min -- moving stuck file aside and restarting" -f $laneName, $stalledMin)
@@ -1265,9 +1316,9 @@ if ($Detect) {
                             -LogPath $laneLogPath `
                             -StallLogPath $stallLogPath
                         if ($didSkip) {
-                            # Reset stall tracking for this lane
                             $laneStall[$laneName].lastChangeAt = Get-Date
                             $laneStall[$laneName].warned = $false
+                            $laneStall[$laneName].escalated = $false
                             Start-Sleep -Seconds 5  # let new worker register
                         } else {
                             Warn2 ("Auto-skip did not succeed for {0}; will warn again at next interval." -f $laneName)
@@ -1455,29 +1506,35 @@ if ($CFU) {
 
         # ===== Per-CFU-lane stall tracking =====
         $cfuLaneFolders = @(Get-ChildItem $paths['CFU_lanes'] -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^cfu_lane' })
+        # Cache completed _res_cfu.mat names once per iteration
+        $allCompletedRes = @{}
+        Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $allCompletedRes[($_.Name -replace '_AQuA2_res_cfu\.mat$','')] = $true
+        }
+
         foreach ($laneDir in $cfuLaneFolders) {
             $laneName = $laneDir.Name
-            # CFU input files are _AQuA2.mat (via junctions); count completions for files originating from this lane
-            # Junction-pointed files: check what _res_cfu.mat exists in POST that matches the lane's _AQuA2.mat stems
+            # CFU input files are _AQuA2.mat (via junctions). Check completions by stem-match in POST.
             $laneMats = @(Get-ChildItem $laneDir.FullName -File -Filter "*_AQuA2.mat" -Recurse -ErrorAction SilentlyContinue)
             $laneCompleted = 0
             foreach ($m in $laneMats) {
                 $stem = ($m.Name -replace '_AQuA2\.mat$','')
-                $expected = Join-Path (Join-Path $paths['POST'] $stem) ("{0}_AQuA2_res_cfu.mat" -f $stem)
-                if (Test-Path $expected) { $laneCompleted++ }
+                if ($allCompletedRes.ContainsKey($stem)) { $laneCompleted++ }
             }
             $lanePID = Get-LanePID -LaneFolder $laneDir.FullName -WorkerExeName 'cfu_lane.exe'
             $laneAlive = ($lanePID -ne $null)
 
             if (-not $cfuLaneStall.ContainsKey($laneName)) {
-                $cfuLaneStall[$laneName] = @{ lastCount=$laneCompleted; lastChangeAt=Get-Date; warned=$false }
+                $cfuLaneStall[$laneName] = @{ lastCount=$laneCompleted; lastChangeAt=Get-Date; warned=$false; escalated=$false }
             } elseif ($laneCompleted -ne $cfuLaneStall[$laneName].lastCount) {
                 $cfuLaneStall[$laneName].lastCount = $laneCompleted
                 $cfuLaneStall[$laneName].lastChangeAt = Get-Date
                 $cfuLaneStall[$laneName].warned = $false
+                $cfuLaneStall[$laneName].escalated = $false
             } else {
                 if ($laneAlive) {
                     $stalledMin = ((Get-Date) - $cfuLaneStall[$laneName].lastChangeAt).TotalMinutes
+                    # Stage 1: warn
                     if ($stalledMin -ge $StallWarnMin -and -not $cfuLaneStall[$laneName].warned) {
                         Write-Host ""
                         Warn2 ("[CFU STALL WARN] {0} (PID {1}) has made no progress for {2:N1} min" -f $laneName, $lanePID, $stalledMin)
@@ -1488,8 +1545,30 @@ if ($CFU) {
                             foreach ($l in $tail) { Warn2 "    $l" }
                         }
                         $cfuLaneStall[$laneName].warned = $true
+                        Add-Content -Path $cfuStallLogPath -Value ("[{0}] CFU STALL WARN: {1} (PID {2}) no progress for {3:N1} min" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $laneName, $lanePID, $stalledMin)
                         Write-Host ""
                     }
+                    # Stage 2: escalate
+                    if ($stalledMin -ge $StallEscalateMin -and -not $cfuLaneStall[$laneName].escalated) {
+                        Write-Host ""
+                        Write-Host "================================================================" -ForegroundColor Red
+                        Write-Host (" [CFU STALL ESCALATED] {0} (PID {1}) stalled {2:N1} min" -f $laneName, $lanePID, $stalledMin) -ForegroundColor Red
+                        Write-Host "================================================================" -ForegroundColor Red
+                        $laneLog = Join-Path $cfuLogDir ("{0}.log" -f $laneName)
+                        $tail = Get-LaneLogTail -LogPath $laneLog -N 10
+                        if ($tail) {
+                            Write-Host "  Last 10 lines from $laneName log:" -ForegroundColor Red
+                            foreach ($l in $tail) { Write-Host ("    $l") -ForegroundColor Red }
+                        }
+                        $minsToAutoSkip = [math]::Round($StallAutoSkipMin - $stalledMin, 1)
+                        Write-Host ("  Auto-action will fire in {0} more minutes (at {1} min total)" -f $minsToAutoSkip, $StallAutoSkipMin) -ForegroundColor Red
+                        Write-Host "  To intervene manually:" -ForegroundColor Red
+                        Write-Host ("    Stop-Process -Id {0} -Force" -f $lanePID) -ForegroundColor Red
+                        Write-Host ""
+                        $cfuLaneStall[$laneName].escalated = $true
+                        Add-Content -Path $cfuStallLogPath -Value ("[{0}] CFU STALL ESCALATED: {1} (PID {2}) no progress for {3:N1} min" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $laneName, $lanePID, $stalledMin)
+                    }
+                    # Stage 3: auto-action (CFU is conservative: kills worker + writes marker, no auto-restart)
                     if ($stalledMin -ge $StallAutoSkipMin -and $StallPolicy -eq 'auto-skip') {
                         Write-Host ""
                         Warn2 ("[CFU STALL AUTO-SKIP] {0} stalled for {1:N1} min -- moving stuck file aside and restarting" -f $laneName, $stalledMin)
@@ -1497,8 +1576,7 @@ if ($CFU) {
                         $stuck = $null
                         foreach ($m in $laneMats) {
                             $stem = ($m.Name -replace '_AQuA2\.mat$','')
-                            $expected = Join-Path (Join-Path $paths['POST'] $stem) ("{0}_AQuA2_res_cfu.mat" -f $stem)
-                            if (-not (Test-Path $expected)) { $stuck = $m; break }
+                            if (-not $allCompletedRes.ContainsKey($stem)) { $stuck = $m; break }
                         }
                         if ($stuck) {
                             Warn2 ("Stuck CFU file: {0}" -f $stuck.Name)
@@ -1530,6 +1608,7 @@ NOTE: This is a marker only. To actually skip this file, manually rename or move
                         }
                         $cfuLaneStall[$laneName].lastChangeAt = Get-Date
                         $cfuLaneStall[$laneName].warned = $false
+                        $cfuLaneStall[$laneName].escalated = $false
                         Write-Host ""
                     }
                 }
