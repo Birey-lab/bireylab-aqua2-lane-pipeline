@@ -350,13 +350,13 @@ These are compiled into ``cfu_lane.exe``. To change, edit ``C:\AQuA2\cfu_lane.m`
 
 ## Files in this folder
 
-- ``pipeline_<timestamp>.log`` — full orchestrator transcript (verbose)
-- ``parameters_for_batch_USED.csv`` — the parameter CSV in effect for THIS run's detection
-- ``cfu_parameters_BAKED.txt`` — what's compiled into the cfu_lane.exe used
-- ``per_file_status_detection.csv`` — file-by-file detection results
-- ``per_file_status_cfu.csv`` — file-by-file CFU results
-- ``run_manifest.json`` — machine-readable summary (for programmatic comparison across runs)
-- ``RUN_SUMMARY.md`` — this file
+- ``pipeline_<timestamp>.log`` -- full orchestrator transcript (verbose)
+- ``parameters_for_batch_USED.csv`` -- the parameter CSV in effect for THIS run's detection
+- ``cfu_parameters_BAKED.txt`` -- what's compiled into the cfu_lane.exe used
+- ``per_file_status_detection.csv`` -- file-by-file detection results
+- ``per_file_status_cfu.csv`` -- file-by-file CFU results
+- ``run_manifest.json`` -- machine-readable summary (for programmatic comparison across runs)
+- ``RUN_SUMMARY.md`` -- this file
 
 ## To go deeper
 

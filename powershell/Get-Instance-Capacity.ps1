@@ -37,7 +37,7 @@ try {
     $instanceType = (Invoke-WebRequest -UseBasicParsing -Headers $hdr -Uri "http://169.254.169.254/latest/meta-data/instance-type" -TimeoutSec 3).Content
     $instanceId   = (Invoke-WebRequest -UseBasicParsing -Headers $hdr -Uri "http://169.254.169.254/latest/meta-data/instance-id"   -TimeoutSec 3).Content
 } catch {
-    # Not on EC2 (or IMDS blocked) — that's fine, leave unknowns.
+    # Not on EC2 (or IMDS blocked) -- that's fine, leave unknowns.
 }
 
 # --- Disk ---
@@ -72,7 +72,7 @@ Write-Host ("  Logical CPUs (vCPU):  {0}" -f $cpu)
 Write-Host ("  Total physical RAM:   {0} GB" -f $ramGB)
 Write-Host ""
 Write-Host "--- Disk ---"
-Write-Host ("  C: drive — {0:N1} GB used / {1:N1} GB total ({2:N1} GB free)" -f $cUsedGB, $cTotalGB, $cFreeGB)
+Write-Host ("  C: drive -- {0:N1} GB used / {1:N1} GB total ({2:N1} GB free)" -f $cUsedGB, $cTotalGB, $cFreeGB)
 foreach ($t in $diskTypes) {
     Write-Host "    $t"
 }
@@ -82,7 +82,7 @@ $cpuCap = [math]::Floor($cpu / 3)
 $cpuCapWith32 = [math]::Min($cpuCap, 32)
 Write-Host ("  CPU-only ceiling (vCPU/3):     {0}" -f $cpuCap)
 Write-Host ("  CPU-only ceiling capped at 32: {0}" -f $cpuCapWith32)
-Write-Host "  (RAM ceiling depends on per-file demand — use Auto-Size-Lanes.ps1 to profile)"
+Write-Host "  (RAM ceiling depends on per-file demand -- use Auto-Size-Lanes.ps1 to profile)"
 Write-Host ""
 Write-Host "Note: EBS volume throughput is set per-volume in AWS Console (gp3 default = 125 MB/s)."
 Write-Host "      32 simultaneous lane workers on default gp3 may bottleneck on IO, not CPU/RAM."
