@@ -671,28 +671,44 @@ if (-not $Force) {
 }
 
 # ==========================================================
-# Phase 0: Auto-size
+# Phase 0: Auto-size (if Lanes not given)
 # ==========================================================
 if (($Split -or $Detect) -and $Lanes -le 0) {
-    Phase 0 "Auto-size lanes"
-    $autoSizer = Join-Path $ScriptsDir 'Auto-Size-Lanes.ps1'
-    $sizeStart = Get-Date
-
-    # Clear any previous recommendation file
-    $recFile = Join-Path $env:TEMP "autosize_recommendation.txt"
-    if (Test-Path $recFile) { Remove-Item $recFile -Force }
-
-    Note "Profiling the largest TIFF (5-15 min)..."
-    & $autoSizer -ProbeFolder $InputTIFFs
-
-    if (Test-Path $recFile) {
-        $Lanes = [int]((Get-Content $recFile -Raw).Trim())
-        Note ("Auto-Size recommended: {0} detection lanes (probe took {1:N1} min)" -f $Lanes, ((Get-Date)-$sizeStart).TotalMinutes)
-        Remove-Item $recFile -Force -ErrorAction SilentlyContinue
+    if (-not $Split) {
+        # Resume scenario: no need to split, derive lane count from existing folders
+        $existingLanes = @(Get-ChildItem $paths['lanes'] -Directory -ErrorAction SilentlyContinue |
+                           Where-Object { $_.Name -match '^lane' })
+        if ($existingLanes.Count -gt 0) {
+            $Lanes = $existingLanes.Count
+            Note ("Using existing lane count: {0} lanes (from {1})" -f $Lanes, $paths['lanes'])
+        } else {
+            Warn2 "Cannot run Detect without lanes. No existing lane folders, and -Split is `$false."
+            Warn2 "Either run with -Split `$true and provide -InputTIFFs, or populate lanes manually first."
+            Stop-Transcript | Out-Null
+            Write-Error "No lanes available for Detection."
+        }
     } else {
-        Warn2 "Auto-Size did not produce a recommendation file. Falling back to CPU-only default."
-        $Lanes = [math]::Min([math]::Floor($cpu / 3), 32)
-        Note ("Using {0} detection lanes (CPU-only default)." -f $Lanes)
+        # Fresh start: profile InputTIFFs to determine lane count
+        Phase 0 "Auto-size lanes"
+        $autoSizer = Join-Path $ScriptsDir 'Auto-Size-Lanes.ps1'
+        $sizeStart = Get-Date
+
+        # Clear any previous recommendation file
+        $recFile = Join-Path $env:TEMP "autosize_recommendation.txt"
+        if (Test-Path $recFile) { Remove-Item $recFile -Force }
+
+        Note "Profiling the largest TIFF (5-15 min)..."
+        & $autoSizer -ProbeFolder $InputTIFFs
+
+        if (Test-Path $recFile) {
+            $Lanes = [int]((Get-Content $recFile -Raw).Trim())
+            Note ("Auto-Size recommended: {0} detection lanes (probe took {1:N1} min)" -f $Lanes, ((Get-Date)-$sizeStart).TotalMinutes)
+            Remove-Item $recFile -Force -ErrorAction SilentlyContinue
+        } else {
+            Warn2 "Auto-Size did not produce a recommendation file. Falling back to CPU-only default."
+            $Lanes = [math]::Min([math]::Floor($cpu / 3), 32)
+            Note ("Using {0} detection lanes (CPU-only default)." -f $Lanes)
+        }
     }
 }
 if ($CFULanes -le 0) {
