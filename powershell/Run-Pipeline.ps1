@@ -1,7 +1,12 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.7 (2026-06-04).
+    Version 0.7.1 (2026-06-04).
+
+.DESCRIPTION
+    v0.7.1 fix: PreCFU consolidation now uses per-stem subfolders (not
+    per-lane subfolders); PreCFU and PostCFU consolidation use hardlinks
+    instead of copies to avoid massive disk doubling on large .mat files.
 
 .DESCRIPTION
     Runs any subset of the pipeline phases on a folder of TIFFs:
@@ -1595,37 +1600,77 @@ if ($Consolidate) {
     }
     Note ("  Hardlinked: {0}, copied: {1}, already present: {2}" -f $tiffLinked, $tiffCopied, $tiffSkipped)
 
-    # ---- PreCFU: copy per-stem subfolders (small _AQuA2.mat files; excludes _lane_logs/_failures) ----
-    Note "Consolidating PreCFU outputs (per-stem subfolders)..."
-    $preStems = @(Get-ChildItem $paths['PreCFU'] -Directory -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -notmatch '^_' })  # skip _lane_logs, _failures
+    # ---- PreCFU: per-stem subfolders, hardlinked (handles huge .mat files efficiently) ----
+    Note "Consolidating PreCFU outputs (per-stem subfolders, hardlinked)..."
+
+    # Detect any stale lane-organized layout from v0.7.0 (pre-fix) runs
+    $staleSubdirs = @(Get-ChildItem $upPreCFU -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Name -match '_results$' -or $_.Name -match '^lane\d+$' })
+    if ($staleSubdirs.Count -gt 0) {
+        Warn2 ("Detected {0} stale lane-organized subfolder(s) in for_upload\PreCFU\:" -f $staleSubdirs.Count)
+        foreach ($d in $staleSubdirs) { Warn2 ("    {0}" -f $d.FullName) }
+        Warn2 "These are from a v0.7.0 run with broken PreCFU layout."
+        Warn2 "Recommended: delete for_upload\PreCFU\ contents and re-run Consolidate."
+        Warn2 "Proceeding with per-stem layout alongside (mixed structure)."
+    }
+
+    # Find ALL _AQuA2.mat files anywhere under PreCFU; route each by stem
+    $allMatFiles = @(Get-ChildItem $paths['PreCFU'] -Recurse -File -Filter "*_AQuA2.mat" -ErrorAction SilentlyContinue |
+                     Where-Object { $_.DirectoryName -notmatch '\\_failures(\\|$)' })
+    Note ("  Found {0} _AQuA2.mat files in source PreCFU" -f $allMatFiles.Count)
+    $preLinked = 0
     $preCopied = 0
-    foreach ($stem in $preStems) {
-        $destStem = Join-Path $upPreCFU $stem.Name
-        if (-not (Test-Path $destStem)) { New-Item -ItemType Directory -Path $destStem -Force | Out-Null }
-        $matFiles = @(Get-ChildItem $stem.FullName -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue)
-        foreach ($m in $matFiles) {
-            $destFile = Join-Path $destStem $m.Name
-            if (-not (Test-Path $destFile)) {
+    $preSkipped = 0
+    foreach ($m in $allMatFiles) {
+        $stem = ($m.Name -replace '_AQuA2\.mat$','')
+        $destDir = Join-Path $upPreCFU $stem
+        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+        $destFile = Join-Path $destDir $m.Name
+        if (Test-Path $destFile) {
+            $preSkipped++
+            continue
+        }
+        try {
+            New-Item -ItemType HardLink -Path $destFile -Value $m.FullName -ErrorAction Stop | Out-Null
+            $preLinked++
+        } catch {
+            try {
                 Copy-Item $m.FullName $destFile -Force
                 $preCopied++
+            } catch {
+                Warn2 ("Failed to consolidate {0}: {1}" -f $m.Name, $_.Exception.Message)
             }
         }
     }
-    Note ("  PreCFU stems consolidated: {0}, .mat files copied: {1}" -f $preStems.Count, $preCopied)
+    Note ("  PreCFU: hardlinked={0}, copied={1}, already present={2}" -f $preLinked, $preCopied, $preSkipped)
 
-    # ---- PostCFU: flatten into single dir (one .mat per stem, no subfolders) ----
-    Note "Consolidating PostCFU outputs (flat: one file per stem)..."
-    $postMats = @(Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue)
+    # ---- PostCFU: flat dir, hardlinked (one .mat per stem, no subfolders) ----
+    Note "Consolidating PostCFU outputs (flat layout, hardlinked)..."
+    $postMats = @(Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.DirectoryName -notmatch '\\_failures(\\|$)' })
+    Note ("  Found {0} _res_cfu.mat files in source POST" -f $postMats.Count)
+    $postLinked = 0
     $postCopied = 0
+    $postSkipped = 0
     foreach ($m in $postMats) {
         $destFile = Join-Path $upPost $m.Name
-        if (-not (Test-Path $destFile)) {
-            Copy-Item $m.FullName $destFile -Force
-            $postCopied++
+        if (Test-Path $destFile) {
+            $postSkipped++
+            continue
+        }
+        try {
+            New-Item -ItemType HardLink -Path $destFile -Value $m.FullName -ErrorAction Stop | Out-Null
+            $postLinked++
+        } catch {
+            try {
+                Copy-Item $m.FullName $destFile -Force
+                $postCopied++
+            } catch {
+                Warn2 ("Failed to consolidate {0}: {1}" -f $m.Name, $_.Exception.Message)
+            }
         }
     }
-    Note ("  PostCFU .mat files flattened: {0}" -f $postCopied)
+    Note ("  PostCFU: hardlinked={0}, copied={1}, already present={2}" -f $postLinked, $postCopied, $postSkipped)
 
     $finalTiffs   = (Get-ChildItem $upTIFFs  -File).Count
     $finalPreCFU  = (Get-ChildItem $upPreCFU -Recurse -Filter "*_AQuA2.mat" -File).Count
@@ -1637,9 +1682,9 @@ if ($Consolidate) {
     $consolidateMarker = @"
 Consolidate phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
 Upload-ready directory:  $uploadDir
-input_TIFFs/ count:      $finalTiffs (hardlinked: $tiffLinked, copied: $tiffCopied)
-PreCFU/ .mat count:      $finalPreCFU
-PostCFU/ .mat count:     $finalPostCFU
+input_TIFFs/ count:      $finalTiffs (hardlinked=$tiffLinked, copied=$tiffCopied)
+PreCFU/ .mat count:      $finalPreCFU (hardlinked=$preLinked, copied=$preCopied)
+PostCFU/ .mat count:     $finalPostCFU (hardlinked=$postLinked, copied=$postCopied)
 Run audit dir:           $runAuditDir
 "@
     $consolidateMarker | Out-File $markerConsolidate -Encoding UTF8
