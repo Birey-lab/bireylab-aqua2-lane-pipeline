@@ -207,6 +207,13 @@ Write-Host ("===> Recommended lanes:          {0}" -f $recommendedLanes) -Foregr
 Write-Host ("===> Binding constraint:         {0}" -f $binding) -ForegroundColor Green
 Write-Host ""
 
+# Write recommendation to a well-known file so Run-Pipeline.ps1 can read it
+# reliably (parsing Write-Host stdout is unreliable across PowerShell host types).
+$recommendationFile = Join-Path $env:TEMP "autosize_recommendation.txt"
+$recommendedLanes | Out-File -FilePath $recommendationFile -Encoding ASCII -NoNewline
+Write-Host ("(recommendation written to {0})" -f $recommendationFile)
+Write-Host ""
+
 # ---------- Suggested commands ----------
 Write-Host "Suggested next steps:" -ForegroundColor Yellow
 Write-Host ""

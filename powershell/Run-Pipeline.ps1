@@ -677,16 +677,20 @@ if (($Split -or $Detect) -and $Lanes -le 0) {
     Phase 0 "Auto-size lanes"
     $autoSizer = Join-Path $ScriptsDir 'Auto-Size-Lanes.ps1'
     $sizeStart = Get-Date
+
+    # Clear any previous recommendation file
+    $recFile = Join-Path $env:TEMP "autosize_recommendation.txt"
+    if (Test-Path $recFile) { Remove-Item $recFile -Force }
+
     Note "Profiling the largest TIFF (5-15 min)..."
-    $rawOut = & $autoSizer -ProbeFolder $InputTIFFs 2>&1
-    foreach ($l in $rawOut) { Write-Host $l }
-    $line = $rawOut | Where-Object { $_ -match '===>\s*Recommended lanes:\s*(\d+)' } | Select-Object -First 1
-    if ($line) {
-        $null = $line -match '===>\s*Recommended lanes:\s*(\d+)'
-        $Lanes = [int]$Matches[1]
+    & $autoSizer -ProbeFolder $InputTIFFs
+
+    if (Test-Path $recFile) {
+        $Lanes = [int]((Get-Content $recFile -Raw).Trim())
         Note ("Auto-Size recommended: {0} detection lanes (probe took {1:N1} min)" -f $Lanes, ((Get-Date)-$sizeStart).TotalMinutes)
+        Remove-Item $recFile -Force -ErrorAction SilentlyContinue
     } else {
-        Warn2 "Could not parse Auto-Size output. Falling back to CPU-only default."
+        Warn2 "Auto-Size did not produce a recommendation file. Falling back to CPU-only default."
         $Lanes = [math]::Min([math]::Floor($cpu / 3), 32)
         Note ("Using {0} detection lanes (CPU-only default)." -f $Lanes)
     }
@@ -750,19 +754,26 @@ if ($Detect) {
     } else {
         Note "Fresh start (no previous detection outputs found)."
     }
-    Note "Launching detection in background job..."
+    Note "Invoking Launch-Lanes-Exe.ps1 (spawns workers, returns quickly)..."
 
-    $job = Start-Job -ScriptBlock {
-        param($scriptPath, $laneRoot, $resultsRoot, $lanes)
-        & $scriptPath -LaneRoot $laneRoot -ResultsRoot $resultsRoot -Lanes $lanes
-    } -ArgumentList $launcher, $paths['lanes'], $paths['PreCFU'], $Lanes
+    # Launch-Lanes-Exe.ps1 is fire-and-forget: it spawns aqua_lane.exe processes
+    # via Start-Process and returns. We call it synchronously, then poll based on
+    # the actual aqua_lane.exe processes.
+    & $launcher -LaneRoot $paths['lanes'] -ResultsRoot $paths['PreCFU'] -Lanes $Lanes
+
+    Note "Launcher returned. Waiting 10s for workers to register, then polling..."
+    Start-Sleep -Seconds 10
 
     $lastDetail = Get-Date
     $throughputWindow = New-Object System.Collections.Queue
     $aborted = $false
+    $noWorkersStreak = 0
+    $everSawWorkers = $false
 
-    while ($job.State -eq 'Running') {
-        Start-Sleep -Seconds $PollEverySec
+    while ($true) {
+        $workers = @(Get-Process aqua_lane -ErrorAction SilentlyContinue)
+        $workerCount = $workers.Count
+        if ($workerCount -gt 0) { $everSawWorkers = $true }
 
         $completed = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue).Count
         $failures  = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue).Count
@@ -785,15 +796,34 @@ if ($Detect) {
         $pct = if ($tifCount -gt 0) { ($completed / $tifCount) * 100 } else { 0 }
 
         Write-Host (
-            "  [{0}] {1,4}/{2,-4} {3,5:N1}% | {4,5:N1} f/min | ETA {5} | RAM {6,5:N1}GB | Disk {7,5:N0}GB | fail {8}" `
-            -f (Get-Date -Format 'HH:mm:ss'), $completed, $tifCount, $pct, $rate, $etaStr, $availRAM, $free, $failures
+            "  [{0}] {1,4}/{2,-4} {3,5:N1}% | {4,5:N1} f/min | ETA {5} | workers {6}/{7} | RAM {8,5:N1}GB | Disk {9,5:N0}GB | fail {10}" `
+            -f (Get-Date -Format 'HH:mm:ss'), $completed, $tifCount, $pct, $rate, $etaStr, $workerCount, $Lanes, $availRAM, $free, $failures
         )
 
+        # --- Exit conditions ---
+        if ($workerCount -eq 0) {
+            $noWorkersStreak++
+        } else {
+            $noWorkersStreak = 0
+        }
+        # Detection complete: workers were running and are now gone for 2 consecutive polls
+        if ($everSawWorkers -and $noWorkersStreak -ge 2) {
+            Note "All detection workers have exited."
+            break
+        }
+        # Sanity: launcher returned but no workers ever appeared (>90s in)
+        if (-not $everSawWorkers -and $elapsed.TotalSeconds -gt 90) {
+            Err2 "Launcher returned but no aqua_lane.exe workers detected after 90s."
+            Err2 "Check Launch-Lanes-Exe.ps1 output above for errors. Aborting."
+            $aborted = $true
+            break
+        }
+
+        # --- Disk-space abort ---
         if ($free -lt $MinFreeDiskGB) {
             Err2 ("Free disk ({0} GB) below threshold ({1} GB). Aborting." -f $free, $MinFreeDiskGB)
-            Err2 "To kill remaining workers manually:"
-            Err2 "  Get-Process aqua_lane | Stop-Process -Force"
-            Stop-Job $job
+            Err2 "Killing workers:"
+            Get-Process aqua_lane -ErrorAction SilentlyContinue | Stop-Process -Force
             $aborted = $true
             break
         }
@@ -804,6 +834,7 @@ if ($Detect) {
             Write-Host ("  --- Detailed snapshot @ {0} ---" -f (Get-Date -Format 'HH:mm:ss'))
             Write-Host ("  Elapsed: {0:hh\:mm\:ss}" -f $elapsed)
             Write-Host ("  Throughput (recent window): {0:N1} files/min" -f $rate)
+            Write-Host ("  Workers alive: {0}/{1}" -f $workerCount, $Lanes)
             if ($etaMin -ge 0) {
                 $eta = (Get-Date).AddMinutes($etaMin)
                 Write-Host ("  ETA: {0} min (~{1})" -f $etaMin, $eta.ToString('HH:mm'))
@@ -816,14 +847,13 @@ if ($Detect) {
             }
             Write-Host ""
         }
-    }
 
-    try { Receive-Job $job -ErrorAction SilentlyContinue | Out-Null } catch {}
-    Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds $PollEverySec
+    }
 
     if ($aborted) {
         Stop-Transcript | Out-Null
-        Write-Error "Detection aborted due to disk space. Free up disk, then re-run with -Split `$false -Detect `$true."
+        Write-Error "Detection aborted. Free up disk or fix launcher issue, then re-run with -Split `$false -Detect `$true."
     }
 
     $finalDone = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File).Count
@@ -876,20 +906,28 @@ if ($CFU) {
     } else {
         Note "Fresh CFU start (no previous CFU outputs found)."
     }
-    Note "Launching CFU in background job..."
+    Note "Invoking Launch-CFU-Lanes.ps1 (spawns workers, returns quickly)..."
 
-    $job = Start-Job -ScriptBlock {
-        param($scriptPath, $laneRoot, $post, $logDir, $lanes)
-        & $scriptPath -LaneRoot $laneRoot -Post $post -LogDir $logDir -Lanes $lanes
-    } -ArgumentList $cfuLauncher, $paths['CFU_lanes'], $paths['POST'], $cfuLogDir, $CFULanes
+    & $cfuLauncher -LaneRoot $paths['CFU_lanes'] -Post $paths['POST'] -LogDir $cfuLogDir -Lanes $CFULanes
+
+    Note "CFU launcher returned. Waiting 10s for workers to register, then polling..."
+    Start-Sleep -Seconds 10
 
     $throughputWindow = New-Object System.Collections.Queue
-    while ($job.State -eq 'Running') {
-        Start-Sleep -Seconds $PollEverySec
+    $noWorkersStreak = 0
+    $everSawWorkers = $false
+    $aborted = $false
+
+    while ($true) {
+        $workers = @(Get-Process cfu_lane -ErrorAction SilentlyContinue)
+        $workerCount = $workers.Count
+        if ($workerCount -gt 0) { $everSawWorkers = $true }
+
         $completed = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue).Count
         $failures  = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_ERROR.txt" -File -ErrorAction SilentlyContinue).Count
         $free = Get-FreeGB
         $availRAM = Get-AvailRAMGB
+        $cfuElapsed = (Get-Date) - $start
 
         $throughputWindow.Enqueue([pscustomobject]@{ t = Get-Date; c = $completed })
         while ($throughputWindow.Count -gt 5) { [void]$throughputWindow.Dequeue() }
@@ -906,12 +944,30 @@ if ($CFU) {
         $pct = if ($matCount -gt 0) { ($completed / $matCount) * 100 } else { 0 }
 
         Write-Host (
-            "  [{0}] {1,4}/{2,-4} {3,5:N1}% | {4,5:N1} f/min | ETA {5} | RAM {6,5:N1}GB | Disk {7,5:N0}GB | fail {8}" `
-            -f (Get-Date -Format 'HH:mm:ss'), $completed, $matCount, $pct, $rate, $etaStr, $availRAM, $free, $failures
+            "  [{0}] {1,4}/{2,-4} {3,5:N1}% | {4,5:N1} f/min | ETA {5} | workers {6}/{7} | RAM {8,5:N1}GB | Disk {9,5:N0}GB | fail {10}" `
+            -f (Get-Date -Format 'HH:mm:ss'), $completed, $matCount, $pct, $rate, $etaStr, $workerCount, $CFULanes, $availRAM, $free, $failures
         )
+
+        # Exit conditions
+        if ($workerCount -eq 0) { $noWorkersStreak++ } else { $noWorkersStreak = 0 }
+        if ($everSawWorkers -and $noWorkersStreak -ge 2) {
+            Note "All CFU workers have exited."
+            break
+        }
+        if (-not $everSawWorkers -and $cfuElapsed.TotalSeconds -gt 90) {
+            Err2 "CFU launcher returned but no cfu_lane.exe workers detected after 90s."
+            Err2 "Check Launch-CFU-Lanes.ps1 output above. Aborting CFU."
+            $aborted = $true
+            break
+        }
+
+        Start-Sleep -Seconds $PollEverySec
     }
-    try { Receive-Job $job -ErrorAction SilentlyContinue | Out-Null } catch {}
-    Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+    if ($aborted) {
+        Stop-Transcript | Out-Null
+        Write-Error "CFU aborted. Investigate launcher output and re-run with -Split `$false -Detect `$false -CFU `$true."
+    }
 
     $finalDone = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File).Count
     $finalFail = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_ERROR.txt" -File).Count
