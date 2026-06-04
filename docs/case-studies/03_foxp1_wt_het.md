@@ -15,7 +15,7 @@ A *smaller* dataset (33 recordings, vs. ~1000 in the other case studies) process
 | **Genotypes** | WT (wild-type), HET (FOXP1 heterozygous) |
 | **Donors** | 3 |
 | **Magnification** | 20x objective |
-| **Acquisition rate** | 1.55 Hz nominal (frameRate=0.645) |
+| **Acquisition rate** | 1.55 Hz nominal (CSV `frameRate=0.64` — close enough to 1/1.55=0.6452) |
 | **Spatial dimensions** | 512 × 512 pixels |
 | **Frames per recording** | ~280 |
 | **Tissue** | Human cortical organoid (FOXP1 WT/HET line) |
@@ -23,6 +23,29 @@ A *smaller* dataset (33 recordings, vs. ~1000 in the other case studies) process
 | **Example** | `FOXP1HET3_3_20x_1.55Hz_1.547Hz.tif` |
 
 Note the very different acquisition profile from Cases 1-2: **much smaller TIFFs** (512² × 280 frames ≈ 140 MB each, vs. ~1.5 GB for the 20Hz hCO data), **slower frame rate** (1.55 Hz vs 20 Hz), and **much shorter recordings** (~180 seconds vs. ~75 seconds at higher framerate). A different acquisition philosophy: longer wall-time per recording, fewer total frames.
+
+### Full parameter set (still in `C:\AQuA2\cfg\parameters_for_batch.csv` on EC2 as of teardown, backed up to S3)
+
+This dataset's parameters are **substantially different from Cases 1 and 2** — reflecting a different recording type that requires different tuning:
+
+| Parameter | FOXP1 value | Comparison to hCO/Assembloid |
+|---|---|---|
+| `registrateCorrect` | 1 | (2 for hCO/Assembloid) — different registration mode |
+| `bleachCorrect` | 1 | (3 for hCO/Assembloid) — different bleach correction |
+| `smoXY` | 0.5 | same |
+| `thrARScl` | 3 | (2 for hCO/Assembloid) — **higher threshold**, less sensitive |
+| `minDur` | 5 | (3 for hCO/Assembloid) — longer minimum duration (in frames; fewer frames overall at 1.55 Hz) |
+| `minSize` | 10 | (20 for hCO/Assembloid) — smaller minimum (smaller pixels at 512² vs 1024²) |
+| **`maxSize`** | **400** | (50000 for Assembloid; hCO uniform but exact value see Case 1 §C.2) — **much tighter cap** in FOXP1, reflecting different activity profile |
+| `sigThr` | 3.5 | (2.5 for hCO/Assembloid) — more conservative significance |
+| `maxDelay` | 0.6 | (0.5 for hCO/Assembloid) |
+| `sourceSensitivity` | 10 | (9 for hCO/Assembloid) — maximum sensitivity |
+| `detectGlo` | 1 | same — but see Section C on what goes wrong here |
+| `gloDur` | 20 | same |
+| **`frameRate`** | **0.64** | (0.05 for hCO/Assembloid) — 1.55 Hz acquisition |
+| **`spatialRes`** | **2.6** | (1.3 for hCO/Assembloid) — different objective/scaling |
+
+**Implication:** this dataset is **not directly comparable** to Cases 1 or 2 on essentially any metric. It's a different preparation, different microscope settings, and different detection parameters. The pipeline works on it fine, but cross-study comparisons need to be limited to qualitative observations (was there activity at all? does WT differ from HET?) rather than quantitative side-by-side.
 
 ---
 

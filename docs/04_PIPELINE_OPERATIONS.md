@@ -35,7 +35,7 @@ Edit `C:\AQuA2\cfg\parameters_for_batch.csv` to match your dataset. Critical row
 
 | Row | What to set |
 |---|---|
-| `maxSize` | Active-region size cap. Start at **50000** for cross-comparability; lower (e.g. 2000) only if hyperactive files hang at higher values |
+| `maxSize` | Active-region size cap. The lab has used different values per dataset (uniform within each, but different across). Examples: Assembloid CACNA1A run used `50000`; FOXP1 run used `400`. Choose based on your data's activity profile and document the choice in a README that travels with the data. Lower values force convergence on hyperactive files; higher values preserve event sizes |
 | `spatialRes` | µm per pixel. **1.3** for 20x typical objective on common rigs; **2.6** for 10x; verify on your microscope |
 | `frameRate` | Seconds per frame. **0.05** for 20 Hz; **0.1** for 10 Hz; etc. |
 
