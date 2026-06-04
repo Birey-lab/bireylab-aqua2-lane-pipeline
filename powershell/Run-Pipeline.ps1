@@ -245,6 +245,12 @@ function Write-RunManifest {
     $exeAqua = "C:\AQuA2\compiled\aqua_lane.exe"
     $exeCfu  = "C:\AQuA2\compiled\cfu_lane.exe"
 
+    $phasesRun = @()
+    if ($Split)  { $phasesRun += 'split' }
+    if ($Detect) { $phasesRun += 'detect' }
+    if ($CFU)    { $phasesRun += 'cfu' }
+    if ($Upload) { $phasesRun += 'upload' }
+
     $manifest = [ordered]@{
         run_id           = $Started.ToString('yyyyMMdd_HHmmss')
         started          = $Started.ToString('yyyy-MM-ddTHH:mm:ss')
@@ -252,12 +258,7 @@ function Write-RunManifest {
         wall_clock       = ('{0:hh\:mm\:ss}' -f ($Completed - $Started))
         output_root      = $OutputRoot
         input_tiffs      = $InputTIFFs
-        phases_run       = @(@(
-            if ($Split)  { 'split' },
-            if ($Detect) { 'detect' },
-            if ($CFU)    { 'cfu' },
-            if ($Upload) { 'upload' }
-        ) | Where-Object { $_ })
+        phases_run       = $phasesRun
         detection_lanes  = $Lanes
         cfu_lanes        = $CFULanes
         config_csv       = if ($ConfigCSV) { $ConfigCSV } else { '(default at C:\AQuA2\cfg\parameters_for_batch.csv)' }
