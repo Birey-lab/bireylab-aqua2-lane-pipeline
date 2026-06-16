@@ -35,11 +35,19 @@ Write-Host " Split into $Lanes lanes   Source: $Source"
 Write-Host " Lane root: $LaneRoot    Mode: $mode"
 Write-Host "===================================================================`n"
 
-# Top-level TIFFs only
+# Top-level TIFFs only.
+# v0.8: exclude macOS AppleDouble sidecars ("._name.tif"): they carry a .tif extension
+# but are tiny resource-fork stubs, not images. If one reaches a lane the TIFF reader
+# throws a fatal "Unable to open TIFF file" that can take the lane worker down.
 $files = Get-ChildItem -LiteralPath $Source -File |
-         Where-Object { $_.Extension -ieq '.tif' -or $_.Extension -ieq '.tiff' } |
+         Where-Object { ($_.Extension -ieq '.tif' -or $_.Extension -ieq '.tiff') -and ($_.Name -notlike '._*') } |
          Sort-Object Length -Descending     # largest first for good greedy balance
 if (-not $files) { Write-Warning "No top-level .tif/.tiff in $Source"; return }
+
+$appleDouble = @(Get-ChildItem -LiteralPath $Source -File | Where-Object { $_.Name -like '._*' })
+if ($appleDouble.Count -gt 0) {
+    Write-Warning ("Ignored {0} macOS AppleDouble (._*) file(s). Strip at upload with: aws s3 sync <src> <dst> --exclude '._*'" -f $appleDouble.Count)
+}
 
 # Greedy bin-packing: assign each file to the lane with the smallest running total
 $laneBytes = New-Object 'long[]' $Lanes

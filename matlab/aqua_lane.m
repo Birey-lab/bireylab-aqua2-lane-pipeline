@@ -58,6 +58,14 @@ files_tif = dir(fullfile(pIn, '*.tif'));
 files_tiff = dir(fullfile(pIn, '*.tiff'));    % use .tif/.tiff for 2D+time data
 files_mat = dir(fullfile(pIn, '*.mat'));      % use .mat for 3D+time data
 files = [files_tif; files_tiff; files_mat];
+
+% v0.8 defense-in-depth: drop macOS AppleDouble sidecars ("._name.tif"). They match
+% the *.tif glob but are resource-fork stubs, not images; the Tiff reader throws a
+% fatal on them. The splitter also excludes these, but guard here too in case a lane
+% was populated by other means.
+if ~isempty(files)
+    files = files(~startsWith({files.name}, '._'));
+end
     
 for xxx = 1:numel(files)
     f1 = files(xxx).name; 

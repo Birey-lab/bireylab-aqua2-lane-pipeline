@@ -27,3 +27,4 @@ PreCFU_*/
 # OS junk
 .DS_Store
 Thumbs.db
+*.backup-pre-comprehensive

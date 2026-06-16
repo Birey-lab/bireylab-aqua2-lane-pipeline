@@ -1,9 +1,34 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.7.4 (2026-06-04).
+    Version 0.8.0 (2026-06-15).
 
 .DESCRIPTION
+    v0.8.0 changes:
+    - CRITICAL (correctness): detection no longer reports COMPLETE just because
+      all workers exited. It now compares real-input count (excluding macOS ._
+      AppleDouble sidecars) to _AQuA2.mat output count. If outputs < inputs it
+      auto-relaunches the lane workers (bounded by -MaxDetectRelaunch, default 3;
+      completed files are skipped on relaunch), and if still short it marks the
+      run detectionIncomplete and refuses to proceed to CFU. This prevents a
+      silently half-processed dataset from looking "done" (root cause of the
+      DGvsCA_C4and8858 incident: a ._ stub killed each lane and the run reported
+      fail 0 / COMPLETE at 50%).
+    - AppleDouble (._*) files are now excluded everywhere: the lane TIFF count,
+      the completeness check, and the input_TIFFs consolidation. Split-IntoLanes
+      and aqua_lane.m also drop them at the source. (They have a .tif extension
+      but are not images; the Tiff reader throws a fatal on them.)
+    - Consolidate now defaults ON (-Consolidate $true) so every run leaves a
+      clean for_upload/ ready for S3. The exact parameters_for_batch_USED.csv
+      (named <ProjectName>_...) and RUN_SUMMARY.md are copied into it for
+      provenance.
+    - NEW -Cleanup switch (default OFF, destructive): after a VERIFIED consolidate
+      (counts must match sources), removes intermediates (lanes/, CFU_lanes/,
+      PreCFU/, POST/) using junction-aware deletion (CFU_lanes junctions removed
+      before their PreCFU targets, via rmdir without /s so targets are never
+      followed) and renames for_upload/ -> <ProjectName>_AQuA2/, leaving one
+      self-contained, S3-ready folder.
+
     v0.7.4 fixes (CRITICAL):
     - Per-lane completion counter was checking wrong path. The worker
       writes outputs to PreCFU/laneNN_results/<stem>_AQuA2.mat, but the
@@ -166,8 +191,10 @@ param(
     [bool]$Split        = $true,
     [bool]$Detect       = $true,
     [bool]$CFU          = $true,
-    [bool]$Consolidate  = $false,   # auto-set to $true if -Upload is $true
+    [bool]$Consolidate  = $true,    # v0.8: default ON -- always leave a clean for_upload/. Gated so it no-ops if CFU produced nothing.
     [bool]$Upload       = $false,
+    [bool]$Cleanup      = $false,   # v0.8: destructive -- remove intermediates + rename to <ProjectName>_AQuA2/. OFF by default; verified before deleting.
+    [int]$MaxDetectRelaunch = 3,    # v0.8: bounded auto-relaunch if detection workers die with files remaining
 
     # --- Detection parameters ---
     [int]$Lanes = 0,
@@ -1169,7 +1196,8 @@ if ($Detect) {
     $start = Get-Date
     $launcher = Join-Path $ScriptsDir 'Launch-Lanes-Exe.ps1'
 
-    $tifCount = (Get-ChildItem -Path $paths['lanes'] -Recurse -Include *.tif,*.tiff -File).Count
+    $tifCount = (Get-ChildItem -Path $paths['lanes'] -Recurse -Include *.tif,*.tiff -File |
+                 Where-Object { $_.Name -notlike '._*' }).Count   # v0.8: ignore macOS ._ sidecars
     $alreadyDone = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue).Count
     Note ("Total TIFFs across lanes: {0}" -f $tifCount)
     if ($alreadyDone -gt 0) {
@@ -1195,6 +1223,10 @@ if ($Detect) {
     $aborted = $false
     $noWorkersStreak = 0
     $everSawWorkers = $false
+    # v0.8: bounded auto-relaunch + completeness tracking for detection
+    $DetectRelaunchCount = 0
+    if (-not $PSBoundParameters.ContainsKey('MaxDetectRelaunch')) { $MaxDetectRelaunch = 3 }
+    $detectionIncomplete = $false
     # Per-lane stall tracking: laneName -> @{ lastCount=N; lastChangeAt=DateTime; warned=$false }
     $laneStall = @{}
     $stallLogPath = Join-Path $runAuditDir "stall_log.txt"
@@ -1336,8 +1368,34 @@ if ($Detect) {
             $noWorkersStreak = 0
         }
         if ($everSawWorkers -and $noWorkersStreak -ge 2) {
-            Note "All detection workers have exited."
-            break
+            # v0.8: workers gone is NOT the same as "done". A single unreadable file
+            # (e.g. a macOS ._ stub, a truncated TIFF) can kill a lane worker mid-run.
+            # Before declaring complete, check whether every REAL input has an output.
+            # _real_ excludes ._ AppleDouble sidecars (counted as TIFFs by the OS but not images).
+            $realInputs = @(Get-ChildItem -Path $paths['lanes'] -Recurse -Include *.tif,*.tiff -File -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -notlike '._*' -and $_.Directory.FullName -notmatch '\\_stalled(\\|$)' }).Count
+            $doneNow    = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue).Count
+            if ($doneNow -ge $realInputs) {
+                Note ("All detection workers have exited. Completeness check OK: {0}/{1} real inputs detected." -f $doneNow, $realInputs)
+                break
+            } else {
+                $missing = $realInputs - $doneNow
+                if ($DetectRelaunchCount -lt $MaxDetectRelaunch) {
+                    $DetectRelaunchCount++
+                    Warn2 ("Workers exited with {0} of {1} real inputs still unprocessed. Relaunching detection (attempt {2}/{3}); completed files are skipped." -f $missing, $realInputs, $DetectRelaunchCount, $MaxDetectRelaunch)
+                    & $launcher -LaneRoot $paths['lanes'] -ResultsRoot $paths['PreCFU'] -Lanes $Lanes
+                    $noWorkersStreak = 0
+                    $everSawWorkers = $false
+                    $relaunchStart = Get-Date
+                    Start-Sleep -Seconds 10
+                    continue
+                } else {
+                    Err2 ("Detection INCOMPLETE: {0} of {1} real inputs processed ({2} missing) after {3} relaunch attempt(s)." -f $doneNow, $realInputs, $missing, $MaxDetectRelaunch)
+                    Err2 "Likely an unreadable input file repeatedly killing a lane. Check PreCFU\_lane_logs\*.err for [FAIL] lines, remove the offending file(s), and re-run -Detect."
+                    $detectionIncomplete = $true
+                    break
+                }
+            }
         }
         if (-not $everSawWorkers -and $elapsed.TotalSeconds -gt 90) {
             Err2 "Launcher returned but no aqua_lane.exe workers detected after 90s."
@@ -1426,6 +1484,11 @@ Run audit dir:           $runAuditDir
 # Phase 3: CFU (build + run, combined)
 # ==========================================================
 if ($CFU) {
+    # v0.8: never run CFU on a detection that didn't finish -- that produces a
+    # silently partial result set that looks complete downstream.
+    if ($detectionIncomplete) {
+        Err2 "Skipping CFU: detection did not complete for all real inputs (see message above). Fix the offending input(s) and re-run -Detect before CFU."
+    } else {
     Phase 3 ("CFU build + run ({0} parallel workers)" -f $CFULanes)
     $start = Get-Date
 
@@ -1688,6 +1751,7 @@ Run audit dir:           $runAuditDir
 "@
     $cfuMarkerContent | Out-File $markerCFU -Encoding UTF8
     $cfuMarkerContent | Out-File (Join-Path $runAuditDir 'PHASE_cfu_COMPLETE.txt') -Encoding UTF8
+    }   # end else (detection complete)
 }
 
 # ==========================================================
@@ -1710,7 +1774,7 @@ if ($Consolidate) {
     $allTiffs = @()
     if (Test-Path $paths['lanes']) {
         $allTiffs += @(Get-ChildItem $paths['lanes'] -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
+                       Where-Object { $_.Name -notlike '._*' -and $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
     }
     Note ("  Found {0} TIFFs in lane folders (excluding _stalled)" -f $allTiffs.Count)
     $tiffLinked = 0
@@ -1831,7 +1895,90 @@ if ($Consolidate) {
     $finalPreCFU  = (Get-ChildItem $upPreCFU -Recurse -Filter "*_AQuA2.mat" -File).Count
     $finalPostCFU = (Get-ChildItem $upPost   -File -Filter "*_res_cfu.mat").Count
 
+    # v0.8: drop the exact parameters CSV used into the upload folder, named with the project,
+    # so provenance travels with the data. Copy (not hardlink) so it survives cleanup.
+    $usedCsv = Join-Path $runAuditDir 'parameters_for_batch_USED.csv'
+    if (Test-Path $usedCsv) {
+        $csvDest = Join-Path $uploadDir ("{0}_parameters_for_batch_USED.csv" -f $ProjectName)
+        Copy-Item $usedCsv $csvDest -Force
+        Note ("  Parameters CSV copied to {0}" -f (Split-Path $csvDest -Leaf))
+    } else {
+        Warn2 "parameters_for_batch_USED.csv not found in run audit dir; skipping CSV copy into for_upload."
+    }
+    # Also drop the human-readable run summary alongside, if present
+    $runSummary = Join-Path $runAuditDir 'RUN_SUMMARY.md'
+    if (Test-Path $runSummary) { Copy-Item $runSummary (Join-Path $uploadDir 'RUN_SUMMARY.md') -Force }
+
     PhaseEnd 4 "Consolidate" $start ("for_upload/: {0} TIFFs, {1} PreCFU .mat, {2} PostCFU .mat" -f $finalTiffs, $finalPreCFU, $finalPostCFU)
+
+    # ------------------------------------------------------------------
+    # v0.8 OPTIONAL CLEANUP (-Cleanup, default OFF; destructive, gated)
+    # Removes intermediate working dirs (lanes/, CFU_lanes/, PreCFU/, POST/)
+    # and renames for_upload/ -> <ProjectName>_AQuA2/ so the user is left with a
+    # single, self-contained, S3-ready folder. Only runs if the consolidated
+    # output is VERIFIED complete first -- never delete sources on faith.
+    # ------------------------------------------------------------------
+    if ($Cleanup) {
+        Note ""
+        Note "[CLEANUP] Verifying consolidated output before removing intermediates..."
+
+        # Real (non-._) source counts to verify against
+        $srcRealTiffs = @(Get-ChildItem $paths['lanes'] -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Name -notlike '._*' -and $_.Directory.FullName -notmatch '\\_stalled(\\|$)' }).Count
+        $srcPreCFU    = (Get-ChildItem $paths['PreCFU'] -Recurse -Filter "*_AQuA2.mat" -File -ErrorAction SilentlyContinue |
+                          Where-Object { $_.DirectoryName -notmatch '\\_failures(\\|$)' }).Count
+        $srcPostCFU   = (Get-ChildItem $paths['POST'] -Recurse -Filter "*_res_cfu.mat" -File -ErrorAction SilentlyContinue |
+                          Where-Object { $_.DirectoryName -notmatch '\\_failures(\\|$)' }).Count
+
+        $okTiff = ($finalTiffs  -ge $srcRealTiffs)
+        $okPre  = ($finalPreCFU -ge $srcPreCFU)
+        $okPost = ($finalPostCFU -ge $srcPostCFU)
+
+        if ($okTiff -and $okPre -and $okPost) {
+            Note ("  Verified: TIFFs {0}/{1}, PreCFU {2}/{3}, PostCFU {4}/{5}. Safe to clean up." -f `
+                  $finalTiffs, $srcRealTiffs, $finalPreCFU, $srcPreCFU, $finalPostCFU, $srcPostCFU)
+
+            # Junction-aware removal helper: CFU_lanes contains directory junctions whose
+            # targets are the real PreCFU result folders. Recursing INTO a junction would
+            # delete the real data. Remove the reparse-point link itself, not its target.
+            function Remove-DirSafe([string]$Dir) {
+                if (-not (Test-Path $Dir)) { return }
+                Get-ChildItem $Dir -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                    if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                        # junction: delete the link without following it (rmdir, no /s)
+                        cmd /c rmdir "$($_.FullName)" 2>$null
+                    }
+                }
+                Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            # Order matters: remove CFU_lanes (junctions) BEFORE PreCFU (their targets)
+            foreach ($d in @('CFU_lanes','lanes','PreCFU','POST')) {
+                $target = $paths[$d]
+                if ($target -and (Test-Path $target)) {
+                    Note ("  Removing intermediate: {0}" -f $target)
+                    Remove-DirSafe $target
+                }
+            }
+
+            # Rename for_upload -> <ProjectName>_AQuA2 (the single deliverable folder)
+            $finalDir = Join-Path $OutputRoot ("{0}_AQuA2" -f $ProjectName)
+            if (Test-Path $finalDir) {
+                Warn2 ("  Target {0} already exists; leaving for_upload/ in place (manual merge needed)." -f $finalDir)
+            } else {
+                try {
+                    Move-Item $uploadDir $finalDir -Force
+                    Note ("  Final deliverable: {0}" -f $finalDir)
+                    Note "  Contains: input_TIFFs/, PreCFU/, PostCFU/, parameters CSV, RUN_SUMMARY.md"
+                } catch {
+                    Warn2 ("  Could not rename for_upload/ -> {0}: {1}" -f $finalDir, $_.Exception.Message)
+                }
+            }
+        } else {
+            Err2 ("[CLEANUP] ABORTED -- consolidated counts do not match sources (TIFFs {0}/{1}, PreCFU {2}/{3}, PostCFU {4}/{5}). Nothing deleted; intermediates preserved for inspection." -f `
+                  $finalTiffs, $srcRealTiffs, $finalPreCFU, $srcPreCFU, $finalPostCFU, $srcPostCFU)
+        }
+    }
 
     # Phase-complete markers (dual-write)
     $consolidateMarker = @"
