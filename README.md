@@ -17,7 +17,7 @@ The pipeline takes raw multi-frame TIFFs (calcium fluorescence movies), splits t
 
 ## Quick start (if you have lab AMI access)
 
-If you can launch from the `Windows2025-AQuA2-Pipeline-v2-Clean` AMI, everything is pre-installed. The fast path:
+If you can launch from the `Windows2025-AQuA2-Pipeline-v3` AMI (`ami-03473aa6f1cc13fbc`), everything is pre-installed. The fast path:
 
 1. Launch an EC2 instance from the AMI with IAM role `EC2toS3Full` attached
 2. RDP in as `Administrator`
@@ -83,7 +83,7 @@ For users without AMI access, or anyone building infrastructure for the first ti
 
 For lab members continuing this work: pipeline artifacts from past runs (compiled `.exe` workers, MATLAB source tree, per-run `parameters_for_batch_*.csv` files) are archived at `s3://bireylab-arvin-us-east-2/CalciumImagingAnalysis/ARCHIVE/_PipelineArtifacts/` with date-stamped subfolders. The June 2026 snapshot includes the parameter CSVs for the CACNA1A hCO, CACNA1A Assembloid, and FOXP1 WT/HET runs documented in [`docs/case-studies/`](docs/case-studies). Authoritative per-recording parameter values also live in each `_AQuA2.mat` file's `opts` struct in the per-dataset S3 prefixes.
 
-The current lab AMI is `Windows2025-AQuA2-Pipeline-v2-Clean` in `us-east-1`; ask Arvin for access.
+The current lab AMI is `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`) in `us-east-1`; ask Arvin for access. (Each instance gets a unique Administrator password — the earlier `v2-Clean` image shared one and is deprecated.)
 
 ---
 

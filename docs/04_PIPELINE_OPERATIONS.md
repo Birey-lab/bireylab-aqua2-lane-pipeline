@@ -646,7 +646,7 @@ Magnification: 20x | Donors: <list> | Conditions: <list>
 
 PIPELINE:
   Orchestrator: $(git -C C:\Users\Administrator\Documents\pipeline-repo describe --tags)
-  AMI: Windows2025-AQuA2-Pipeline-v2-Clean (2026-06-04)
+  AMI: Windows2025-AQuA2-Pipeline-v3 (ami-03473aa6f1cc13fbc, 2026-06-15)
   Worker exes: $(Get-Item C:\AQuA2\compiled\aqua_lane.exe | Select-Object -ExpandProperty LastWriteTime) / $(Get-Item C:\AQuA2\compiled\cfu_lane.exe | Select-Object -ExpandProperty LastWriteTime)
 
 DETECTION PARAMETERS:

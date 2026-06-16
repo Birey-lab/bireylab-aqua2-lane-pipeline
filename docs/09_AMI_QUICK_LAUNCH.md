@@ -1,6 +1,6 @@
 # 09 — AMI Quick Launch (v0.7.4 fast path)
 
-This is the **recommended entry point** for new users with access to the pre-built lab AMI `Windows2025-AQuA2-Pipeline-v2-Clean`. It bypasses the manual infrastructure setup ([`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md)) and most of the multi-script operations ceremony ([`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md) — retained for advanced/debugging use) by leveraging the `Run-Pipeline.ps1` orchestrator (v0.7.4+).
+This is the **recommended entry point** for new users with access to the pre-built lab AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, us-east-1). It bypasses the manual infrastructure setup ([`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md)) and most of the multi-script operations ceremony ([`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md) — retained for advanced/debugging use) by leveraging the `Run-Pipeline.ps1` orchestrator (v0.7.4+).
 
 If you don't have AMI access yet, or need to build a new AMI from scratch, fall back to docs 02 → 04 in order.
 
@@ -33,7 +33,7 @@ You're a lab member or collaborator who:
 
 ### A.2 — What the AMI ships with
 
-The AMI `Windows2025-AQuA2-Pipeline-v2-Clean` (built 2026-06-04) is a Windows Server 2025 image with everything pre-installed and on PATH:
+The AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, built 2026-06-15) is a Windows Server 2025 image with everything pre-installed and on PATH. Unlike the earlier `v2-Clean` image, v3 was sysprepped so **each instance launched from it gets its own unique Administrator password** (retrieve it via EC2 console → Connect → RDP client → Get password, decrypt with your key pair). Do not use `v2-Clean`: every instance from it shared one baked-in password.
 
 | Component | Location | Notes |
 |---|---|---|
@@ -90,7 +90,7 @@ You can attach the role post-launch via EC2 console → Actions → Security →
 
 ### B.3 — Launch checklist
 
-AWS Console → EC2 → AMIs → search `Windows2025-AQuA2-Pipeline-v2-Clean` → **Launch instance from AMI**:
+AWS Console → EC2 → AMIs → search `Windows2025-AQuA2-Pipeline-v3` → **Launch instance from AMI**:
 
 - **Name**: `<your-initials>-aqua2-<dataset-name>-<date>` (e.g., `ab-aqua2-foxp1-2026-06-15`)
 - **Instance type**: from [§B.1](#b1--pick-the-right-instance-size)
@@ -466,7 +466,7 @@ Magnification: 20x | Donors: <list> | Conditions: <list>
 
 PIPELINE:
   Orchestrator: $(git -C C:\Users\Administrator\Documents\pipeline-repo describe --tags)
-  AMI: Windows2025-AQuA2-Pipeline-v2-Clean (2026-06-04)
+  AMI: Windows2025-AQuA2-Pipeline-v3 (ami-03473aa6f1cc13fbc, 2026-06-15)
   Worker .exe: aqua_lane.exe ($(Get-Item C:\AQuA2\compiled\aqua_lane.exe).LastWriteTime), cfu_lane.exe ($(Get-Item C:\AQuA2\compiled\cfu_lane.exe).LastWriteTime)
 
 DETECTION PARAMETERS (active File1 column of parameters_for_batch.csv):
