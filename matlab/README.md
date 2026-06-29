@@ -42,6 +42,17 @@ The compiled exes only need to be rebuilt when:
 
 For normal pipeline use, just use the existing exes.
 
+## Pending rebuild (source ahead of deployed exe)
+
+- **`ftsGlo2.channel` label fix (2026-06-29):** `aqua_lane.m` previously tagged
+  channel-2 **global** features as `channel = 1` (copy-paste bug). The source now
+  sets `ftsGlo2.channel = 2`. This only affects **dual-channel recordings run with
+  `detectGlo=ON`** — the `_Glo_Ch2.xlsx` / `fts` global struct. The fix takes
+  effect **only after `aqua_lane.exe` is rebuilt via `mcc`** (see Compiling
+  above); until then the deployed exe still writes the wrong channel tag for
+  channel-2 globals. Single-channel runs and all local (non-global) features are
+  unaffected.
+
 ## What's baked in vs. external
 
 **Baked into the exes at compile time:**
