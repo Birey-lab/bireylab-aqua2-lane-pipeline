@@ -1,6 +1,17 @@
 <#
 .SYNOPSIS
-  Launch K headless MATLAB processes in parallel, one per lane, each running aqua_cmd_batch_lane.
+  [DEPRECATED -- legacy, license-consuming] Launch K headless MATLAB processes in
+  parallel, one per lane, each running aqua_cmd_batch_lane.
+
+.NOTES
+  DEPRECATED. This is the pre-compiled detection launcher. It starts a full
+  licensed MATLAB per lane, which CONTRADICTS the project's design invariant of
+  compiled, license-free workers (parallelism unbounded by license seats). The
+  production path is Launch-Lanes-Exe.ps1 + aqua_lane.exe (run via Run-Pipeline.ps1).
+  It also requires aqua_cmd_batch_lane.m, which is NOT committed to this repo (it
+  is the non-compiled batch variant; the compiled aqua_lane.m replaced it). Use
+  this only on a licensed MATLAB box without the compiled workers; otherwise
+  prefer Launch-Lanes-Exe.ps1.
 
 .DESCRIPTION
   For each lane folder (lane01..laneK under -LaneRoot), starts a hidden MATLAB that runs:

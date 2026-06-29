@@ -4,8 +4,16 @@ The real `.m` source files for the two compiled workers that drive the pipeline.
 
 | File | Lines | Role |
 |---|---|---|
-| `aqua_lane.m` | 483 | Detection worker — reads TIFFs, calls AQuA2 detection, writes `_AQuA2.mat` + CSV + XLSX + movie |
+| `aqua_lane.m` | 491 | Detection worker — reads TIFFs, calls AQuA2 detection, writes `_AQuA2.mat` + CSV + XLSX + movie |
 | `cfu_lane.m` | 129 | CFU clustering worker — reads detection results, runs CFU clustering, bakes results in-place + writes standalone `_res_cfu.mat` |
+
+> **Not in this repo: `aqua_cmd_batch_lane.m`.** The legacy
+> [`powershell/Launch-Lanes.ps1`](../powershell/Launch-Lanes.ps1) launcher (the
+> pre-compiled, license-consuming path) calls a script named
+> `aqua_cmd_batch_lane.m`. That file is intentionally **not committed** here — the
+> compiled `aqua_lane.m` path replaced it. If you must run the legacy launcher,
+> recover the script from the S3 `_PipelineArtifacts/` archive. For all normal use,
+> use `aqua_lane.exe` via `Launch-Lanes-Exe.ps1` / `Run-Pipeline.ps1`.
 
 ## How these get used
 
