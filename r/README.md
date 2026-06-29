@@ -43,6 +43,16 @@ Rscript AQuA2_CFU_pipeline_v4_27_FOXP1_WT_HET.R
 
 The script writes outputs to whatever `out_dir` is set to (typically `C:\Users\Administrator\Documents\RESULTS_<dataset>\` on EC2 or `/Volumes/External/CalciumTesting/RESULTS_<dataset>/` on a Mac for local testing).
 
+## Planned refactor
+
+The current "copy the whole script and edit the top" model means the three
+dataset variants are ~99% identical 6,300-line files, so every bug fix is applied
+three times and a forgotten scope filter can silently drop all data. A proposed
+config-driven refactor (one engine + a small per-dataset config, plus a
+fail-fast validation pre-flight) is designed in
+[`../docs/10_R_ANALYSIS_REFACTOR_PLAN.md`](../docs/10_R_ANALYSIS_REFACTOR_PLAN.md).
+Not yet executed — until then, follow the manual adaptation steps below.
+
 ## Adapting for a new dataset
 
 Open the script and update:
