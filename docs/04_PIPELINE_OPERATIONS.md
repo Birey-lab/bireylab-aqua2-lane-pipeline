@@ -2,7 +2,7 @@
 
 The day-to-day procedure for running the pipeline on a sized instance. Assumes you've completed [`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md) and [`03_SIZING_AND_RESIZING_GUIDE.md`](03_SIZING_AND_RESIZING_GUIDE.md) — that is, your instance is provisioned and (if needed) sized for your data.
 
-**As of orchestrator v0.7.4 (June 2026)**, the entire pipeline is driven by a single PowerShell script — `powershell/Run-Pipeline.ps1` — that handles all five phases (Split → Detect → CFU → Consolidate → Upload), per-run audit trails, three-stage stall detection, and resume guards. This document is structured around that orchestrator.
+**As of orchestrator v0.8.1 (June 2026)**, the entire pipeline is driven by a single PowerShell script — `powershell/Run-Pipeline.ps1` — that handles all five phases (Split → Detect → CFU → Consolidate → Upload), per-run audit trails, three-stage stall detection, resume guards, and a detection-completeness gate. This document is structured around that orchestrator. See [`../CHANGELOG.md`](../CHANGELOG.md) for what changed between versions.
 
 If you need to run the underlying scripts manually (debugging an opaque failure, redistributing pathological files, or testing with non-standard inputs), see [Appendix Z](#appendix-z-manual-workflow-pre-v07-or-debugging) for the manual workflow. For >95% of routine runs, **you only need sections A–E**.
 
@@ -50,7 +50,7 @@ aws configure set default.s3.max_queue_size 10000
 cd C:\Users\Administrator\Documents\pipeline-repo
 git pull
 git describe --tags
-# Should show v0.7.4 or later
+# Should show v0.8.1 or later
 ```
 
 ### A.3 — Verify the stack
@@ -99,18 +99,20 @@ $totalGB = [math]::Round(((Get-ChildItem D:\incoming_tiffs -Filter *.tif | Measu
 
 ## B. The orchestrator at a glance
 
-`Run-Pipeline.ps1` drives five sequential phases. Each can be toggled on/off independently. By default, Split + Detect + CFU run; Consolidate and Upload are off (Consolidate auto-enables if you set `-Upload $true`).
+`Run-Pipeline.ps1` drives five sequential phases. Each can be toggled on/off independently. **By default (v0.8+), Split + Detect + CFU + Consolidate run; only Upload is off.** Consolidate defaults ON so every run leaves a clean `for_upload/` ready for S3; it no-ops harmlessly if CFU produced nothing. To stop after detection for manual inspection, pass `-CFU $false` (which leaves Consolidate with nothing to do).
+
+> **Completeness gate (v0.8).** If detection finishes with fewer `_AQuA2.mat` outputs than real inputs (`._` AppleDouble sidecars excluded), the orchestrator auto-relaunches the lane workers up to `-MaxDetectRelaunch` times (default 3; completed files are skipped). If it is still short, the run is marked `detectionIncomplete` and **CFU, Consolidate, and Upload all refuse to run** — a partial dataset is never packaged or published as if complete. Fix the offending input(s) and re-run `-Detect`.
 
 | # | Phase | What it does | Output |
 |---|---|---|---|
 | 0 | **Auto-Size** (implicit) | Probes the largest input TIFF; computes safe lane count for the instance's RAM. Skipped if `-Lanes` is explicitly set. | (selects lane count) |
 | 1 | **Split** | Moves TIFFs from `-InputTIFFs` into `<projectRoot>\lanes\laneNN\` folders, size-balanced. | `<projectRoot>\lanes\laneNN\*.tif` |
 | 2 | **Detect** | Launches N `aqua_lane.exe` workers in parallel, each processes its lane's TIFFs. | `<projectRoot>\PreCFU\laneNN_results\<stem>_AQuA2.mat` (+ siblings) |
-| 3 | **CFU** | Launches M `cfu_lane.exe` workers (~0.75 × N by default) over detected `.mat` files via NTFS junctions. Bakes CFU fields into the original `.mat` AND writes a standalone `_res_cfu.mat`. | `<projectRoot>\PostCFU\<stem>_AQuA2_res_cfu.mat` |
+| 3 | **CFU** | Launches M `cfu_lane.exe` workers (~0.75 × N by default) over detected `.mat` files via NTFS junctions. Bakes CFU fields into the original `.mat` AND writes a standalone `_res_cfu.mat`. | `<projectRoot>\POST\<stem>_AQuA2_res_cfu.mat` |
 | 4 | **Consolidate** | Builds `<projectRoot>\for_upload\` with `input_TIFFs/`, `PreCFU/` (per-stem), `PostCFU/` (flat). Uses **NTFS hardlinks** — zero extra disk cost. | `<projectRoot>\for_upload\` |
 | 5 | **Upload** | `aws s3 sync` of `for_upload/` to the S3 prefix you specify. | (files in S3) |
 
-> **What `Run-Pipeline.ps1` replaced.** Pre-v0.7, you ran `Split-IntoLanes.ps1` → `Launch-Lanes-Exe.ps1` → `Build-CFU-Lanes.ps1` → `Launch-CFU-Lanes.ps1` → `Consolidate-Template.ps1` → `aws s3 sync` by hand, with manual stuck-lane recovery between phases. v0.7.4 collapses all of this into one command with built-in resume, audit trails, and stall handling. The old scripts still exist in `powershell/` for the cases in [Appendix Z](#appendix-z-manual-workflow-pre-v07-or-debugging).
+> **What `Run-Pipeline.ps1` replaced.** Pre-v0.7, you ran `Split-IntoLanes.ps1` → `Launch-Lanes-Exe.ps1` → `Build-CFU-Lanes.ps1` → `Launch-CFU-Lanes.ps1` → `Consolidate-Template.ps1` → `aws s3 sync` by hand, with manual stuck-lane recovery between phases. v0.7+ collapses all of this into one command with built-in resume, audit trails, and stall handling (and, from v0.8, a detection-completeness gate). The old scripts still exist in `powershell/` for the cases in [Appendix Z](#appendix-z-manual-workflow-pre-v07-or-debugging).
 
 ### Project root layout
 
@@ -133,11 +135,14 @@ D:\runs\my_dataset_2026-06-15\          ← projectRoot
 │   └── _lane_logs\
 │       ├── lane01.log
 │       └── lane01.err
-├── PostCFU\                            ← phase 3 output (flat)
+├── CFU_lanes\                          ← phase 3 NTFS junctions into PreCFU
+│   └── _logs\
+│       └── cfu_lane01.log
+├── POST\                               ← phase 3 output (flat)
 │   ├── <stem1>_AQuA2_res_cfu.mat
 │   ├── <stem2>_AQuA2_res_cfu.mat
 │   └── ...
-├── for_upload\                         ← phase 4 output (hardlinks)
+├── for_upload\                         ← phase 4 output (hardlinks; PostCFU\ here is the consolidated copy of POST\)
 │   ├── input_TIFFs\                    ← flat
 │   ├── PreCFU\                         ← per-stem subfolders
 │   └── PostCFU\                        ← flat
@@ -148,14 +153,16 @@ D:\runs\my_dataset_2026-06-15\          ← projectRoot
         ├── run_manifest.json
         ├── parameters_for_batch_USED.csv
         ├── cfu_parameters_BAKED.txt
-        ├── PHASE_1_SPLIT_COMPLETE.txt
-        ├── PHASE_2_DETECT_COMPLETE.txt
-        ├── PHASE_3_CFU_COMPLETE.txt
-        ├── per_file_status_detect.csv
+        ├── PHASE_split_COMPLETE.txt
+        ├── PHASE_detect_COMPLETE.txt
+        ├── PHASE_cfu_COMPLETE.txt
+        ├── PHASE_consolidate_COMPLETE.txt
+        ├── per_file_status_detection.csv
         ├── per_file_status_cfu.csv
         ├── stall_log.txt
+        ├── failures_summary_detection.md
         └── failures\
-            └── <stem>_ERROR.txt (one per failed file)
+            └── detection\<stem>_ERROR.txt (one per failed file)
 ```
 
 ---
@@ -216,7 +223,7 @@ You'll see:
 - **Project paths**: where outputs and logs will land
 - **Pre-flight check results**: are the scripts and `.exe`s where they should be, is disk sufficient, etc.
 - **Plan summary**: which phases will run, input file count, lane count (auto-sized or specified)
-- **Resume context**: how many `.mat` files already exist in `PreCFU` and `PostCFU` (these will be skipped by per-file guards)
+- **Resume context**: how many `.mat` files already exist in `PreCFU` and `POST` (these will be skipped by per-file guards)
 - **Active parameter values** from `parameters_for_batch.csv` — specifically the File1 column, with `detectGlo` highlighted yellow (OFF) or green (ON)
 - **Stall thresholds**: 30 min warn / 45 min escalate / 60 min auto-skip (defaults)
 - **Free disk**
@@ -357,7 +364,7 @@ Ctrl+C to stop watching (won't affect the run).
 $proj = "D:\runs\my_dataset_2026-06-15"
 $inputs   = (Get-ChildItem "$proj\lanes" -Recurse -Filter *.tif | Where-Object { $_.Directory.FullName -notmatch '_stalled' }).Count
 $detected = (Get-ChildItem "$proj\PreCFU" -Recurse -Filter *_AQuA2.mat).Count
-$cfu      = (Get-ChildItem "$proj\PostCFU" -Recurse -Filter *_res_cfu.mat -ErrorAction SilentlyContinue).Count
+$cfu      = (Get-ChildItem "$proj\POST" -Recurse -Filter *_res_cfu.mat -ErrorAction SilentlyContinue).Count
 $alive    = (Get-Process aqua_lane,cfu_lane -ErrorAction SilentlyContinue | Measure-Object).Count
 "Input: $inputs | Detected: $detected | CFU: $cfu | Workers alive: $alive"
 ```
@@ -496,7 +503,7 @@ Open the `_ERROR.txt` to diagnose. Common causes:
 - **Corrupt TIFF** — re-export from Fiji.
 - **TIFF too short (<50 frames)** — trim wasn't applied; rerun the trim macro.
 - **Out-of-memory** — the file is unusually large; either process it solo on a bigger instance, or lower `maxSize` for that file in a single-file batch.
-- **Anomalously high event count** — AQuA2's feature extraction can run out of memory on pathological event counts. Carol FOXP1 lanes 05 and 30 in May 2026 hit this; flag for manual review.
+- **Anomalously high event count** — AQuA2's feature extraction can run out of memory on pathological event counts (a very active or very noisy recording). These typically surface as a stalled lane that auto-skips, or an OOM `_ERROR.txt`; flag the file for manual review and consider a lower `maxSize` for it.
 - **Bad cfg path** — the worker can't find `parameters_for_batch.csv`. Confirm it's at `C:\AQuA2\cfg\` and the orchestrator's `-ConfigCSV` resolves to it.
 
 ### I.2 — An entire lane errors out at startup
@@ -530,8 +537,8 @@ Every run creates `<projectRoot>\_logs\run_<timestamp>\` with the following file
 | `run_manifest.json` | Machine-readable manifest: orchestrator version, worker .exe LastWriteTime, parameter checksums, timing |
 | `parameters_for_batch_USED.csv` | Exact copy of the AQuA2 CSV active at runtime |
 | `cfu_parameters_BAKED.txt` | Documented CFU parameters compiled into `cfu_lane.exe` |
-| `PHASE_<N>_<NAME>_COMPLETE.txt` | One marker per completed phase, with timestamp |
-| `per_file_status_detect.csv` | One row per file: status (DONE/FAILED/STALLED), worker PID, duration |
+| `PHASE_<name>_COMPLETE.txt` | One marker per completed phase (`split`, `detect`, `cfu`, `consolidate`, `upload`), with timestamp |
+| `per_file_status_detection.csv` | One row per file: status (OK/FAIL), size, completion time, location |
 | `per_file_status_cfu.csv` | Same for CFU phase |
 | `stall_log.txt` | All WARN/ESCALATED/AUTO-SKIP events with timestamps |
 | `failures\<stem>_ERROR.txt` | One file per failure with full error trace |
@@ -560,7 +567,7 @@ $proj = "D:\runs\my_dataset_2026-06-15"
 # Counts should align (modulo any documented exclusions)
 $inputs  = (Get-ChildItem "$proj\lanes" -Recurse -Filter *.tif | Where-Object { $_.Directory.FullName -notmatch '_stalled' }).Count
 $detected = (Get-ChildItem "$proj\PreCFU" -Recurse -Filter *_AQuA2.mat).Count
-$cfu      = (Get-ChildItem "$proj\PostCFU" -Recurse -Filter *_res_cfu.mat).Count
+$cfu      = (Get-ChildItem "$proj\POST" -Recurse -Filter *_res_cfu.mat).Count
 "Inputs: $inputs   Detected: $detected   CFU: $cfu"
 
 # No workers still running
@@ -573,17 +580,17 @@ Get-ChildItem "$proj\PreCFU\_lane_logs" -Filter *.err | Where-Object {$_.Length 
 Get-ChildItem "$proj\_logs\run_*\failures" -ErrorAction SilentlyContinue
 ```
 
-If `detected < inputs`: check `failures\` and `_stalled\` to account for the gap.
-If `cfu < detected`: rare — usually means CFU phase didn't complete; re-run with `-Split $false -Detect $false -CFU $true`.
+If `detected < inputs`: check `failures\` and `_stalled\` to account for the gap. (From v0.8, detection won't report complete in this state — it auto-relaunches and, if still short, blocks CFU/Consolidate/Upload.)
+If `cfu < detected`: usually means the CFU phase didn't finish (a worker died on a bad `.mat`). From v0.8.1 the orchestrator prints a prominent **"CFU INCOMPLETE"** warning at the end of the CFU phase in this case. Check `POST\_failures\*_ERROR.txt` and any `_STALLED_*.txt` markers under `CFU_lanes\`, then re-run with `-Split $false -Detect $false -CFU $true` (the resume guard skips completed files).
 
 Sanity-check the nCFU distribution (quick proxy for run quality):
 
 ```powershell
-Select-String -Path "$proj\PostCFU\_lane_logs\*.log" -Pattern 'nCFU=(\d+)' |
+Select-String -Path "$proj\CFU_lanes\_logs\*.log" -Pattern 'nCFU=(\d+)' |
   ForEach-Object { [int]($_.Matches.Groups[1].Value) } |
   Measure-Object -Average -Maximum -Minimum
 
-Select-String -Path "$proj\PostCFU\_lane_logs\*.log" -Pattern 'nCFU=0\b' |
+Select-String -Path "$proj\CFU_lanes\_logs\*.log" -Pattern 'nCFU=0\b' |
   Measure-Object | Select -Expand Count
 ```
 
@@ -695,7 +702,7 @@ $proj = "D:\runs\my_dataset_2026-06-15"
 # But wait — these ARE the same files as in for_upload\ (hardlinks). Deleting from one location
 # only removes that name; data persists if any hardlink still exists. So delete BOTH:
 Remove-Item "$proj\PreCFU" -Recurse -Force
-Remove-Item "$proj\PostCFU" -Recurse -Force
+Remove-Item "$proj\POST" -Recurse -Force
 Remove-Item "$proj\for_upload" -Recurse -Force
 
 # Lane TIFFs (you have them in S3 source)

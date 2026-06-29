@@ -1,6 +1,6 @@
-# 09 — AMI Quick Launch (v0.7.4 fast path)
+# 09 — AMI Quick Launch (v0.8.1 fast path)
 
-This is the **recommended entry point** for new users with access to the pre-built lab AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, us-east-1). It bypasses the manual infrastructure setup ([`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md)) and most of the multi-script operations ceremony ([`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md) — retained for advanced/debugging use) by leveraging the `Run-Pipeline.ps1` orchestrator (v0.7.4+).
+This is the **recommended entry point** for new users with access to the pre-built lab AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, us-east-1). It bypasses the manual infrastructure setup ([`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md)) and most of the multi-script operations ceremony ([`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md) — retained for advanced/debugging use) by leveraging the `Run-Pipeline.ps1` orchestrator (v0.8.1+).
 
 If you don't have AMI access yet, or need to build a new AMI from scratch, fall back to docs 02 → 04 in order.
 
@@ -128,7 +128,7 @@ Open PowerShell on the EC2 instance (Start menu → PowerShell). Run these check
 cd C:\Users\Administrator\Documents\pipeline-repo
 git pull
 git describe --tags
-# Should show v0.7.4 or later
+# Should show v0.8.1 or later
 
 # Tool checks (all should return paths, not errors)
 where.exe matlab
@@ -195,7 +195,7 @@ If `count` is 0, recheck the source path.
 
 ## E. Run the pipeline (one command)
 
-This is where v0.7.4 dramatically simplifies vs the manual workflow in [`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md).
+This is where the orchestrator (v0.8+) dramatically simplifies vs the manual workflow in [`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md).
 
 ### E.1 — Edit detection parameters (if needed)
 
@@ -284,9 +284,11 @@ The orchestrator drives 5 phases:
 1. **Auto-Size** (if `-Lanes` not specified): probes largest TIFF to determine safe lane count
 2. **Split**: moves TIFFs from `InputTIFFs` into `<projectRoot>\lanes\laneNN\` folders (size-balanced)
 3. **Detect**: launches N `aqua_lane.exe` workers in parallel, each processes its lane's TIFFs, outputs to `<projectRoot>\PreCFU\laneNN_results\<stem>_AQuA2.mat`
-4. **CFU**: launches M `cfu_lane.exe` workers (~0.75 × N by default), bakes CFU data into the `.mat` files and writes standalone `_res_cfu.mat` to `<projectRoot>\PostCFU\`
-5. **Consolidate**: creates `<projectRoot>\for_upload\` with `input_TIFFs/`, `PreCFU/`, `PostCFU/` subfolders using **hardlinks** (zero extra disk cost, even for multi-GB `.mat` files)
+4. **CFU**: launches M `cfu_lane.exe` workers (~0.75 × N by default), bakes CFU data into the `.mat` files and writes standalone `_res_cfu.mat` to `<projectRoot>\POST\`
+5. **Consolidate**: creates `<projectRoot>\for_upload\` with `input_TIFFs/`, `PreCFU/`, `PostCFU/` subfolders using **hardlinks** (zero extra disk cost, even for multi-GB `.mat` files). The consolidated `PostCFU/` here is the flat copy of `POST/`.
 6. **Upload**: `aws s3 sync` of `for_upload/` to the specified S3 prefix
+
+> **Completeness gate (v0.8+).** Detection won't report "done" while real inputs remain unprocessed: it auto-relaunches workers (up to `-MaxDetectRelaunch`, default 3) and, if still short, marks the run incomplete and refuses to run CFU, Consolidate, and Upload. So an interrupted/half-detected run can't be silently packaged or uploaded as if complete.
 
 Every run creates an audit subfolder `<projectRoot>\_logs\run_<timestamp>\` containing:
 
@@ -295,8 +297,8 @@ Every run creates an audit subfolder `<projectRoot>\_logs\run_<timestamp>\` cont
 - `run_manifest.json` — machine-readable manifest
 - `parameters_for_batch_USED.csv` — archived copy of the AQuA2 params at runtime
 - `cfu_parameters_BAKED.txt` — documented CFU params
-- `PHASE_<N>_<NAME>_COMPLETE.txt` — per-phase completion markers
-- `per_file_status_*.csv` — per-file DONE/FAILED/STALLED status
+- `PHASE_<name>_COMPLETE.txt` — per-phase completion markers (`split`, `detect`, `cfu`, `consolidate`, `upload`)
+- `per_file_status_detection.csv` / `per_file_status_cfu.csv` — per-file OK/FAIL status
 - `failures/` — per-file `_ERROR.txt` for any failures
 - `stall_log.txt` — all WARN, ESCALATED, AUTO-SKIP events
 
@@ -327,7 +329,7 @@ Per-lane progress:
     ...
 ```
 
-### F.1 — Three-stage stall detection (v0.7.4)
+### F.1 — Three-stage stall detection (v0.8.1)
 
 If a lane stops making progress, the orchestrator escalates through three stages:
 
@@ -365,7 +367,7 @@ Ctrl+C to stop watching (won't affect the run).
 $proj = "D:\runs\my_dataset_2026-06-15"
 $inputs = (Get-ChildItem "$proj\lanes" -Recurse -Filter *.tif | Where-Object { $_.Directory.FullName -notmatch '_stalled' }).Count
 $detected = (Get-ChildItem "$proj\PreCFU" -Recurse -Filter *_AQuA2.mat).Count
-$cfu = (Get-ChildItem "$proj\PostCFU" -Recurse -Filter *_res_cfu.mat -ErrorAction SilentlyContinue).Count
+$cfu = (Get-ChildItem "$proj\POST" -Recurse -Filter *_res_cfu.mat -ErrorAction SilentlyContinue).Count
 $alive = (Get-Process aqua_lane,cfu_lane -ErrorAction SilentlyContinue | Measure-Object).Count
 "Input: $inputs | Detected: $detected | CFU: $cfu | Workers alive: $alive"
 ```
@@ -408,7 +410,7 @@ Check `<projectRoot>\_logs\run_<ts>\failures\<stem>_ERROR.txt` for the MATLAB er
 - Corrupt TIFF — re-export from Fiji
 - TIFF too short (<50 frames) — trim wasn't applied
 - Out-of-memory — usually means the file is unusually large; relaunch with a bigger instance, or process the file solo with lower `maxSize`
-- Anomalously high event count — AQuA2's feature extraction can exceed memory on extreme event counts (Carol FOXP1 lanes 05 and 30 had this pattern in May 2026)
+- Anomalously high event count — AQuA2's feature extraction can exceed memory on extreme event counts (a very active or noisy recording); process it solo with a lower `maxSize`, or exclude and document it
 
 To exclude a problem file and continue, just move it out of the input folder and re-run. Document the exclusion in your run README.
 
