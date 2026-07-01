@@ -246,7 +246,7 @@ This creates **NTFS junctions** to the existing detection results — no data is
 .\Launch-CFU-Lanes.ps1 -LaneRoot C:\path\to\CFU_lanes -Post C:\path\to\POST -LogDir C:\path\to\CFU_lanes\_logs -Lanes 28
 ```
 
-**Pass `-LogDir` explicitly!** The default value doesn't change between datasets, so consecutive runs will overwrite each other's logs. See [Pitfall #7](06_PITFALLS_AND_RECOVERY.md).
+Passing `-LogDir` is optional now — the current script defaults it to `<LaneRoot>\_logs`, so distinct lane roots get distinct logs. Only if you reuse the *same* `-LaneRoot` for two batches do you need to pass `-LogDir` (or rename the old logs) to avoid overwriting them. See [Pitfall #7](06_PITFALLS_AND_RECOVERY.md).
 
 CFU is fast — usually minutes to a couple hours, not days.
 
@@ -402,7 +402,7 @@ Even with stop+resize, the EBS volume retains all your data. Cost difference: 24
 | `cfu_lane.exe` finishes but `_res_cfu.mat` files are missing | Either CFU didn't actually run (check log) or output went to wrong path | Confirm `-Post` argument in launcher matches what you expect |
 | R script reads `.mat` files and gets `NULL` for every field | `rhdf5` is failing silently. Often = R using `hdf5r` not `rhdf5` | `library(rhdf5)` explicitly, check `H5Rdereference` works |
 | Lane logs show files completed but `_AQuA2.mat` files are missing | The `_failures/` subfolder has them — they crashed during save | Read `_failures\<name>_ERROR.txt` for the cause |
-| You re-ran CFU and lost the previous batch's logs | Default `-LogDir` collision (Pitfall #7) | Always pass `-LogDir` explicitly per run |
+| You re-ran CFU and lost the previous batch's logs | Old fixed `-LogDir` default (Pitfall #7; fixed — default now derives from `-LaneRoot`) | Update the script, or pass `-LogDir` explicitly if reusing a lane root |
 | Half-baked outputs in S3 from a failed run | Bad upload; partial sync | `aws s3 rm s3://... --recursive` the bad prefix, re-upload after fixing |
 
 ---

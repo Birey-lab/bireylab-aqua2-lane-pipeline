@@ -117,7 +117,7 @@ If `is_real_cell_array` is TRUE, you got the right orientation. If FALSE, swap a
 
 **Symptom:** running a new CFU batch overwrites logs from a previous batch. Lane logs `_logs\cfu_lane01.log` through `_logs\cfu_laneNN.log` no longer reflect what you think they do.
 
-**Cause:** `Launch-CFU-Lanes.ps1` has a `-LogDir` parameter, but its **default value** is `C:\Users\Administrator\Documents\CFU_lanes\_logs\` regardless of the `-LaneRoot` you pass. If you don't override `-LogDir`, sequential runs overwrite the earlier batch's logs at the same lane numbers.
+**Cause (older script copies):** early versions hardcoded the `-LogDir` **default** to `C:\Users\Administrator\Documents\CFU_lanes\_logs\` regardless of the `-LaneRoot` you passed, so without an explicit `-LogDir`, sequential runs overwrote the earlier batch's logs at the same lane numbers. Current scripts fix this (see **Fixed** below).
 
 **Fix (either):**
 
@@ -133,9 +133,9 @@ Rename-Item C:\Users\Administrator\Documents\CFU_lanes\_logs C:\Users\Administra
 
 The Option A pattern is cleaner if you remember it. Option B is a safety net if you don't.
 
-**Orchestrator note (v0.7+):** this pitfall only applies when you call `Launch-CFU-Lanes.ps1` **standalone**. `Run-Pipeline.ps1` always passes `-LogDir` explicitly (`<projectRoot>\CFU_lanes\_logs`), so per-project runs already get isolated logs — you only need the workarounds below for manual/standalone invocations.
+**Orchestrator note (v0.7+):** `Run-Pipeline.ps1` always passes `-LogDir` explicitly (`<projectRoot>\CFU_lanes\_logs`), so per-project runs have always had isolated logs — this pitfall only ever affected standalone `Launch-CFU-Lanes.ps1` calls.
 
-**Possible script improvement (PR welcome):** make the default `$LogDir` derive from `$LaneRoot` (e.g., `$LaneRoot\_logs`) so each standalone CFU batch writes to a fresh log location automatically. Two-line change.
+**Fixed:** `Launch-CFU-Lanes.ps1` now defaults `-LogDir` to `<LaneRoot>\_logs`, so each standalone CFU batch on a distinct `-LaneRoot` writes to its own log location automatically. The only remaining way to collide is to reuse the *same* `-LaneRoot` for two batches — in that case still pass `-LogDir` explicitly (Option A) or rename the old logs first (Option B).
 
 ---
 
