@@ -11,6 +11,22 @@ parameters).
 
 ---
 
+## Unreleased
+
+Documentation consistency pass (no code/behavior changes):
+- `docs/02`: pinned the MATLAB Runtime / compiler version to **R2026a (Update 2)** — the
+  version the current `.exe`s were built with — instead of the stale "R2024a+"; added a
+  pricing disclaimer matching `docs/08`.
+- Reconciled the **CFU bottleneck** description: `docs/08` called it "memory-bound" while
+  `docs/03`/`docs/02` call it disk/throughput-bound. Harmonized toward the authoritative
+  `docs/03` framing (loads/rewrites multi-GB `.mat` files → EBS-throughput bound; per-lane
+  RAM scales with result size), keeping the "run fewer lanes" guidance and the large-result
+  OOM caveat.
+- Removed stale "v0.8 work-stealing" references in `docs/09` (never shipped); pointed the
+  recompile examples at the real `ftsGlo2` fix / CFU-threshold changes.
+- Added orchestrator cross-references to `docs/06` pitfalls #1 (stall auto-skip) and #7
+  (orchestrator passes `-LogDir`, so the log-collision pitfall is standalone-only).
+
 ## v0.8.2 — 2026-07-01
 
 Observability + a small correctness follow-up to the completeness gate. Added CI.

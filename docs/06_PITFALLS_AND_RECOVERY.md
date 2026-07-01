@@ -19,6 +19,8 @@ These are documented in (roughly) decreasing severity. The first half are setup/
 
 **Related:** the probe protocol (Sizing Guide Part C) catches per-file RAM spikes early so you can address pathological files before the full run.
 
+**Orchestrator note (v0.7+):** `Run-Pipeline.ps1`'s three-stage stall detection auto-quarantines a hyperactive file that hangs a lane (moves it to `_stalled\` and restarts the lane), and the end-of-run banner lists every stalled file. That mitigates the "one bad file hangs the run" case without mixing parameters — you still decide afterward whether to exclude it or re-run it solo at a lower `maxSize`.
+
 ---
 
 ## 2. `Start-Process -WindowStyle Hidden` mangles `matlab -batch` arguments
@@ -131,7 +133,9 @@ Rename-Item C:\Users\Administrator\Documents\CFU_lanes\_logs C:\Users\Administra
 
 The Option A pattern is cleaner if you remember it. Option B is a safety net if you don't.
 
-**Possible script improvement (PR welcome):** make the default `$LogDir` derive from `$LaneRoot` (e.g., `$LaneRoot\_logs`) so each new CFU batch writes to a fresh log location automatically. Two-line change.
+**Orchestrator note (v0.7+):** this pitfall only applies when you call `Launch-CFU-Lanes.ps1` **standalone**. `Run-Pipeline.ps1` always passes `-LogDir` explicitly (`<projectRoot>\CFU_lanes\_logs`), so per-project runs already get isolated logs — you only need the workarounds below for manual/standalone invocations.
+
+**Possible script improvement (PR welcome):** make the default `$LogDir` derive from `$LaneRoot` (e.g., `$LaneRoot\_logs`) so each standalone CFU batch writes to a fresh log location automatically. Two-line change.
 
 ---
 

@@ -55,7 +55,7 @@ You do **not** need to install anything to start a typical run.
 
 - **Your data.** TIFFs (or LIFs to convert) you bring yourself.
 - **An IAM role.** Attached at instance launch — see [§B.2](#b2--required-iam-role).
-- **A MATLAB license at runtime.** None needed — the workers are compiled and run on the free MATLAB Runtime. (A MATLAB license IS needed to *recompile* the workers, e.g., for v0.8 work-stealing; that's a maintainer task.)
+- **A MATLAB license at runtime.** None needed — the workers are compiled and run on the free MATLAB Runtime. (A MATLAB license IS needed to *recompile* the workers — e.g., to apply the `ftsGlo2` channel fix or change CFU thresholds; that's a maintainer task.)
 - **R script automation.** Run R scripts manually post-pipeline; see [`05_DOWNSTREAM_R_ANALYSIS.md`](05_DOWNSTREAM_R_ANALYSIS.md).
 
 ---
@@ -538,7 +538,7 @@ This quick-launch path covers ~90% of routine runs. Fall back to the deeper docs
 
 ### J.1 — You need to rebuild the AMI
 
-Reasons: new MATLAB version, new R packages, new orchestrator architecture (e.g., v0.8 work-stealing requires recompiled `.exe` workers), AMI bit-rot. See [`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md) for the from-scratch install procedure.
+Reasons: new MATLAB version, new R packages, recompiled `.exe` workers (e.g., applying the `ftsGlo2` channel fix or changed CFU thresholds), AMI bit-rot. See [`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md) for the from-scratch install procedure.
 
 ### J.2 — You're sizing an unfamiliar dataset
 
