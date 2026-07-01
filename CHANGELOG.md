@@ -11,7 +11,7 @@ parameters).
 
 ---
 
-## Unreleased
+## v0.8.5 — 2026-07-01
 
 Docs only (no code/behavior change):
 - **AWS pricing reconciled to broad ranges.** `docs/08`'s outlier figures (r7a.8xlarge
