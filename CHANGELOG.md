@@ -11,6 +11,17 @@ parameters).
 
 ---
 
+## Unreleased
+
+- **`Launch-CFU-Lanes.ps1`**: the default `-LogDir` now derives from `-LaneRoot`
+  (`<LaneRoot>\_logs`) instead of a fixed `C:\...\CFU_lanes\_logs`, so standalone CFU
+  runs on distinct lane roots no longer overwrite each other's logs — resolving the
+  `docs/06` Pitfall #7 footgun for standalone use (the orchestrator already passed
+  `-LogDir` explicitly). `docs/06` and `docs/08` updated accordingly.
+- Consistency sweep: folded the former `Unreleased` docs block into the v0.8.3 entry
+  below (it shipped in the v0.8.3 tag), and verified no remaining version/path/marker
+  drift, broken internal links, tabs, or trailing whitespace across the repo.
+
 ## v0.8.3 — 2026-07-01
 
 Diagnosability: make it fast to pinpoint *why* a run misbehaved.
@@ -30,9 +41,7 @@ Diagnosability: make it fast to pinpoint *why* a run misbehaved.
 - **Config sanity pre-flight** on `parameters_for_batch.csv` (frameRate plausible, maxSize /
   spatialRes present) to catch misconfiguration before a long run.
 
-## Unreleased
-
-Documentation consistency pass (no code/behavior changes):
+**Documentation consistency (same release):**
 - `docs/02`: pinned the MATLAB Runtime / compiler version to **R2026a (Update 2)** — the
   version the current `.exe`s were built with — instead of the stale "R2024a+"; added a
   pricing disclaimer matching `docs/08`.
