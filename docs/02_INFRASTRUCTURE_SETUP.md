@@ -11,9 +11,9 @@ The pipeline runs on **Windows** (Server 2022 or 2025 recommended). The full sta
 | Software | Version (tested) | Purpose | Cost |
 |---|---|---|---|
 | Windows Server | 2022 / 2025 | OS | Standard EC2 pricing |
-| MATLAB Runtime | matches the version used to compile the `.exe`s | Required to run `aqua_lane.exe` / `cfu_lane.exe` | Free |
+| MATLAB Runtime | **R2026a** (must match the version the `.exe`s were compiled with) | Required to run `aqua_lane.exe` / `cfu_lane.exe` | Free |
 | AQuA2 | v3+ | The actual detection/CFU algorithms | Free (open source) |
-| MATLAB (full) | R2024a+ | **Only needed to compile workers initially** | License required |
+| MATLAB (full) | **R2026a Update 2** (the version the current workers were built with) | **Only needed to compile workers** | License required |
 | MATLAB Compiler toolbox | matching MATLAB version | **Only for compilation** | License required |
 | R | 4.5+ | Downstream analysis | Free |
 | `rhdf5` R package | 2.50+ | Reading MATLAB v7.3 `.mat` files in R | Free (Bioconductor) |
@@ -43,7 +43,7 @@ Order of installation:
 3. R + RStudio
 4. Fiji
 5. rclone + WinFsp
-6. MATLAB Runtime (download from MathWorks for the same version used to compile the `.exe`s)
+6. MATLAB Runtime (download from MathWorks — **R2026a**, matching the version the current `.exe`s were compiled with; a mismatched Runtime won't run them)
 7. AQuA2 (clone from `https://github.com/yu-lab-vt/AQuA2`)
 8. Place compiled `.exe`s at `C:\AQuA2\compiled\`
 9. Place `parameters_for_batch.csv` at `C:\AQuA2\cfg\`
@@ -193,7 +193,7 @@ EBS volumes can be **resized larger online** (no instance restart). Shrinking is
 
 ## G. Cost overview
 
-At the time of writing (2026, us-east-2, on-demand prices), expect:
+Prices below are rough on-demand figures (2026, us-east-2) and are **illustrative only** — AWS rates change and are not consistent across every doc here. Confirm the current rate on the [AWS pricing page](https://aws.amazon.com/ec2/pricing/on-demand/) before a long run. Expect roughly:
 
 | Phase | Instance | Hourly | For ~1000 files |
 |---|---|---|---|

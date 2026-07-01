@@ -231,7 +231,7 @@ Common failures and their causes are in [06_PITFALLS_AND_RECOVERY.md](06_PITFALL
 
 ### Step 6 — Build CFU lanes
 
-CFU clustering is memory-bound, not CPU-bound. **Use fewer parallel workers** than for detection — typically 16-28 lanes on a machine where detection ran 32 lanes.
+CFU loads and rewrites multi-GB `.mat` files, so it is I/O-heavy, not CPU-heavy. **Use fewer parallel workers** than for detection — typically 16-28 lanes on a machine where detection ran 32 lanes — because concurrent large writes saturate EBS throughput, and per-lane RAM scales with result size (see [`03_SIZING_AND_RESIZING_GUIDE.md`](03_SIZING_AND_RESIZING_GUIDE.md) B.2).
 
 ```powershell
 .\Build-CFU-Lanes.ps1 -Root C:\path\to\PreCFU -LaneRoot C:\path\to\CFU_lanes -Lanes 28 -DryRun
@@ -353,7 +353,7 @@ Resume-safe. Just re-run `Launch-Lanes-Exe.ps1` with the same args. Completed fi
 
 ### CFU step ran out of memory
 
-CFU is memory-bound. Symptoms: machine swap-thrashing, lane processes dying with no error. Reduce CFU lane count:
+On datasets with very large `.mat` results, many concurrent CFU lanes can exhaust RAM. Symptoms: machine swap-thrashing, lane processes dying with no error. Reduce CFU lane count:
 ```powershell
 .\Launch-CFU-Lanes.ps1 -LaneRoot ... -Post ... -Lanes 16
 ```
