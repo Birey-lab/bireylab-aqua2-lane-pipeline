@@ -25,7 +25,7 @@ end
 if pOut(end) ~= filesep; pOut = [pOut, filesep]; end
 % Keep each lane single-process: stop parfor from auto-spawning a pool across all cores.
 try; ps = parallel.Settings; ps.Pool.AutoCreate = false; catch; end
-LANE_VERSION = 'v3-compiled (2026-05-23): movie=ON, risingMaps=OFF, parpool=disabled, resume+per-file-guard=ON';
+LANE_VERSION = 'v3-compiled (2026-06-29): movie=ON, risingMaps=OFF, parpool=disabled, resume+per-file-guard=ON, ftsGlo2.channel fix';
 fprintf('=== aqua_lane %s ===\n', LANE_VERSION);
 fprintf('LANE start: pIn=%s  pOut=%s  cfg=%s\n', pIn, pOut, cfgFile);
 
@@ -282,7 +282,7 @@ for xxx = 1:numel(files)
         fts2.channel = 2;
         if ~isempty(gloEvt2)
             [ftsGlo2, dffMatGlo2, dMatGlo2,dffAlignedMatGlo2] = fea.getFeaturesTop(datOrg2, gloEvt2, opts, []);
-            ftsGlo2.channel = 1;
+            ftsGlo2.channel = 2;   % was 1 (copy-paste bug): these are channel-2 global features
         else
             ftsGlo2 = []; dffAlignedMatGlo2 = [];
         end

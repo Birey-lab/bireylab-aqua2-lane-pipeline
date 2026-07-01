@@ -69,6 +69,8 @@ If you're going to run the R analysis, **open the R script you'll use and update
 
 ### 1.5 — Instance sizing
 
+> **Pricing note.** Dollar figures in this doc are rough, on-demand, us-east-1/us-east-2, as of mid-2026, and are illustrative only — they have drifted and are not consistent across every doc. Always confirm the current rate in the [AWS pricing page](https://aws.amazon.com/ec2/pricing/on-demand/) (or with Spot) before committing to a long run.
+
 | Dataset size | Recommended instance |
 |---|---|
 | < 100 TIFFs, exploratory | r7i.2xlarge (8 vCPU, 64 GB, ~$0.53/hr) |
@@ -149,19 +151,19 @@ If all three succeed: the configuration is good. Launch the real run.
 
 The pipeline can be run two ways:
 
-**Option A — One command (recommended for typical use)**: [`Run-Pipeline.ps1`](../powershell/Run-Pipeline.ps1) orchestrates the pipeline with explicit per-phase toggles (`-Split`, `-Detect`, `-CFU`, `-Upload`) and a pre-flight summary that requires user confirmation.
+**Option A — One command (recommended for typical use)**: [`Run-Pipeline.ps1`](../powershell/Run-Pipeline.ps1) orchestrates the pipeline with explicit per-phase toggles (`-Split`, `-Detect`, `-CFU`, `-Consolidate`, `-Upload`) and a pre-flight summary that requires user confirmation. `-OutputRoot` and `-ProjectName` are both required; all data + audit live under `<OutputRoot>\<ProjectName>\`.
 
 ```powershell
-.\Run-Pipeline.ps1 -InputTIFFs C:\Datasets\NewDS\AllTIFFs -OutputRoot C:\Datasets\NewDS
+.\Run-Pipeline.ps1 -InputTIFFs C:\Datasets\NewDS\AllTIFFs -OutputRoot C:\Datasets -ProjectName NewDS
 ```
 
-By default, only Split and Detect are enabled — the pipeline stops after detection for you to verify the results before committing to CFU. Re-run with `-CFU $true` to continue.
+**By default (v0.8+), Split + Detect + CFU + Consolidate all run; only Upload is off.** A routine run therefore leaves a clean `for_upload/` ready for S3. To stop after detection for manual inspection, pass `-CFU $false`. The old "stop after detection" safety behavior is now handled by the v0.8 completeness gate instead of a default checkpoint — see [`../CHANGELOG.md`](../CHANGELOG.md) and [`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md) §B.
 
 For datasets that need custom parameters, pass `-ConfigCSV path\to\my_params.csv` and the orchestrator backs up the existing default CSV before swapping in yours.
 
 Progress prints every 60 seconds (one-liner: files done, throughput, ETA, RAM, disk free, failure count) with a detailed snapshot every 5 minutes. Skip the confirmation prompt with `-Force`.
 
-**Option B — Step-by-step**: invoke the individual scripts in sequence. Useful if you want to inspect intermediate state between phases, or skip a phase entirely.
+**Option B — Step-by-step (legacy / debugging)**: invoke the individual scripts in sequence. This is the pre-v0.7 manual workflow, retained for isolating a single phase when debugging or for legacy instances without the orchestrator. For routine runs use Option A. Note that the orchestrator uses the `<ProjectName>`-nested layout (`PreCFU/`, `POST/`, `CFU_lanes/`, `for_upload/`); the standalone scripts below take explicit paths and predate that convention, so don't mix outputs from the two.
 
 Either way, what each step does:
 
@@ -323,6 +325,7 @@ Same idea for CFU crashes — re-run with `-CFU $true` and the existing `_res_cf
 - `PHASE_split_COMPLETE.txt`
 - `PHASE_detect_COMPLETE.txt`
 - `PHASE_cfu_COMPLETE.txt`
+- `PHASE_consolidate_COMPLETE.txt`
 - `PHASE_upload_COMPLETE.txt`
 
 If you re-run with a phase toggle ON and its marker exists, the plan summary will warn you:

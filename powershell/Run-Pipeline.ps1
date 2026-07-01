@@ -1,9 +1,27 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.8.0 (2026-06-15).
+    Version 0.8.1 (2026-06-29).
 
 .DESCRIPTION
+    v0.8.1 changes (correctness):
+    - Consolidate and Upload now honor the detection-completeness gate. v0.8.0
+      refused CFU on an incomplete detection but still consolidated (and could
+      upload) the partial PreCFU set, which re-opened the exact "partial looks
+      complete" hole the gate was meant to close. Both phases now no-op with a
+      clear error when detection did not finish for all real inputs in this run.
+    - CFU stall auto-skip message corrected: it kills the worker and writes a
+      _STALLED_ marker (no file move, no auto-restart, because CFU lanes are
+      junctions). The previous "moving stuck file aside and restarting" text
+      described detection behavior, not CFU behavior.
+    - Upload now reports the ACTUAL number of files synced (counted from the real
+      `aws s3 sync` output via Tee-Object) instead of echoing the dry-run
+      prediction as if it were the result.
+    - Post-CFU completeness check: warns prominently if fewer _res_cfu.mat files
+      were produced than _AQuA2.mat inputs (detection had a bounded auto-relaunch
+      for this; CFU previously just exited silently when a worker died).
+    - RUN_SUMMARY.md phase table now lists the Consolidate phase.
+
     v0.8.0 changes:
     - CRITICAL (correctness): detection no longer reports COMPLETE just because
       all workers exited. It now compares real-input count (excluding macOS ._
@@ -60,7 +78,7 @@
       Phase 1 - Split TIFFs into balanced lane folders   (-Split,       default ON)
       Phase 2 - Detection (parallel aqua_lane.exe)       (-Detect,      default ON)
       Phase 3 - CFU build + run                          (-CFU,         default ON in v0.7)
-      Phase 4 - Consolidate outputs into for_upload/     (-Consolidate, default OFF; auto-ON if Upload)
+      Phase 4 - Consolidate outputs into for_upload/     (-Consolidate, default ON in v0.8; also auto-ON if Upload)
       Phase 5 - S3 upload                                (-Upload,      default OFF)
 
     REQUIRED parameters: -OutputRoot AND -ProjectName.
@@ -90,10 +108,14 @@
       per-run for historical record.
     - Split phase warns explicitly that it MOVES files.
 
-    The default ON-ON-OFF-OFF gives a natural checkpoint after detection:
-    inspect results, verify file counts, adjust CFU lane count if needed,
-    THEN re-run with -CFU $true to continue. Avoids accidentally committing
-    hours of compute to CFU on a broken detection run.
+    The default (v0.8+) runs Split + Detect + CFU + Consolidate ON and Upload
+    OFF, so a routine invocation leaves a clean for_upload/ ready for S3 without
+    publishing anything automatically. The safety net against committing CFU to a
+    broken detection is no longer a manual checkpoint but the v0.8 completeness
+    gate: detection auto-relaunches if outputs < real inputs, and CFU/Consolidate/
+    Upload refuse to run on a detection that still did not finish (see v0.8.0 and
+    v0.8.1 changes above). To stop after detection for manual inspection, pass
+    -CFU $false.
 
     Pre-flight checks run BEFORE any heavy work. Pre-flight summary prints
     the plan with checkmarks and requires confirmation (skip with -Force).
@@ -557,10 +579,11 @@ function Write-RunSummary {
     $boxX = '[X]'
     $boxE = '[ ]'
     $rows = @(
-        ('{0} Split TIFFs into lanes'      -f ($(if ($Split)  { $boxX } else { $boxE })))
-        ('{0} Detection (aqua_lane.exe)'   -f ($(if ($Detect) { $boxX } else { $boxE })))
-        ('{0} CFU (build + run)'           -f ($(if ($CFU)    { $boxX } else { $boxE })))
-        ('{0} S3 upload'                   -f ($(if ($Upload) { $boxX } else { $boxE })))
+        ('{0} Split TIFFs into lanes'      -f ($(if ($Split)       { $boxX } else { $boxE })))
+        ('{0} Detection (aqua_lane.exe)'   -f ($(if ($Detect)      { $boxX } else { $boxE })))
+        ('{0} CFU (build + run)'           -f ($(if ($CFU)         { $boxX } else { $boxE })))
+        ('{0} Consolidate (for_upload/)'   -f ($(if ($Consolidate) { $boxX } else { $boxE })))
+        ('{0} S3 upload'                   -f ($(if ($Upload)      { $boxX } else { $boxE })))
     )
 
     $md = @"
@@ -1634,7 +1657,7 @@ if ($CFU) {
                     # Stage 3: auto-action (CFU is conservative: kills worker + writes marker, no auto-restart)
                     if ($stalledMin -ge $StallAutoSkipMin -and $StallPolicy -eq 'auto-skip') {
                         Write-Host ""
-                        Warn2 ("[CFU STALL AUTO-SKIP] {0} stalled for {1:N1} min -- moving stuck file aside and restarting" -f $laneName, $stalledMin)
+                        Warn2 ("[CFU STALL AUTO-SKIP] {0} stalled for {1:N1} min -- killing worker and writing a stall marker (no auto-restart for CFU)" -f $laneName, $stalledMin)
                         # Find stuck file: a _AQuA2.mat under this lane (via junction) without matching _res_cfu.mat
                         $stuck = $null
                         foreach ($m in $laneMats) {
@@ -1732,6 +1755,17 @@ NOTE: This is a marker only. To actually skip this file, manually rename or move
     $finalFailNew = [math]::Max(0, $finalFailRaw - $cfuBaselineFailures)
     PhaseEnd 3 "CFU" $start ("Files: $finalDone OK, $finalFailNew failed in this run")
 
+    # v0.8.1: CFU completeness check. Detection has a bounded auto-relaunch + hard
+    # gate (v0.8.0); CFU previously just exited when its workers died, so a worker
+    # killed by a bad _AQuA2.mat could leave POST silently short. We don't auto-
+    # relaunch CFU (its lanes are junctions and a persistently-bad file would loop),
+    # but we surface the shortfall loudly so it isn't mistaken for a complete run.
+    if ($finalDone -lt $matCount) {
+        $cfuMissing = $matCount - $finalDone
+        Warn2 ("CFU INCOMPLETE: {0}/{1} detection outputs produced a _res_cfu.mat ({2} missing)." -f $finalDone, $matCount, $cfuMissing)
+        Warn2 "Check POST\_failures\*_ERROR.txt and any _STALLED_*.txt markers under CFU_lanes\, then re-run -CFU (the resume guard skips completed files)."
+    }
+
     # Per-file audit CSV for CFU
     Write-PerFileStatus -Phase 'cfu' -ResultsDir $paths['POST'] -OkPattern '*_res_cfu.mat' -FailDir $null
 
@@ -1757,7 +1791,13 @@ Run audit dir:           $runAuditDir
 # ==========================================================
 # Phase 4: Consolidate -- flatten outputs into for_upload/
 # ==========================================================
-if ($Consolidate) {
+if ($Consolidate -and $detectionIncomplete) {
+    # v0.8.1: do not package a partial detection as if it were complete.
+    Phase 4 ("Consolidate outputs for upload")
+    Err2 "Skipping Consolidate: detection did not complete for all real inputs this run (see message above)."
+    Err2 "A partial result set must not be packaged into for_upload/. Fix the offending input(s), re-run -Detect, then -Consolidate."
+}
+elseif ($Consolidate) {
     Phase 4 ("Consolidate outputs for upload")
     $start = Get-Date
 
@@ -1996,7 +2036,13 @@ Run audit dir:           $runAuditDir
 # ==========================================================
 # Phase 5: S3 upload
 # ==========================================================
-if ($Upload) {
+if ($Upload -and $detectionIncomplete) {
+    # v0.8.1: never publish a partial dataset to S3.
+    Phase 5 ("S3 upload to {0}" -f $S3Prefix)
+    Err2 "Skipping S3 upload: detection did not complete for all real inputs this run; refusing to publish a partial dataset to S3."
+    Err2 "Fix the offending input(s), re-run -Detect, then re-run with -Upload."
+}
+elseif ($Upload) {
     if (-not $S3Prefix) {
         Err2 "Upload enabled but -S3Prefix not specified. Skipping upload."
     } else {
@@ -2014,14 +2060,19 @@ if ($Upload) {
         Note ("Dry-run: {0} files would be uploaded." -f $dryCount)
 
         Note "Proceeding with real upload..."
-        & aws s3 sync $uploadSource $S3Prefix
-        PhaseEnd 5 "S3 upload" $start $null
+        # v0.8.1: Tee the real sync output so we both stream it live AND count the
+        # files actually uploaded (lines start with "upload:"; dry-run lines start
+        # with "(dryrun) upload:"). Previously the dry-run prediction was reported
+        # as the result, which was wrong if anything changed between the two calls.
+        & aws s3 sync $uploadSource $S3Prefix 2>&1 | Tee-Object -Variable realSync
+        $uploadedCount = (@($realSync) | Where-Object { $_ -match '^upload:' }).Count
+        PhaseEnd 5 "S3 upload" $start ("Files uploaded: $uploadedCount (dry-run predicted $dryCount)")
 
         $uploadMarker = @"
 Upload phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
 Source:        $uploadSource
 Destination:   $S3Prefix
-Files uploaded: $dryCount
+Files uploaded: $uploadedCount (dry-run predicted $dryCount)
 Run audit dir: $runAuditDir
 "@
         $uploadMarker | Out-File $markerUpload -Encoding UTF8
