@@ -35,7 +35,7 @@ param(
     [string]$LaneRoot    = "C:\Users\Administrator\Documents\hCO_lanes",
     [string]$ResultsRoot = "C:\Users\Administrator\Documents\hCO_lanes",
     [string]$AquaDir     = "C:\Users\Administrator\Documents\AQuA2",
-    [string]$MatlabExe   = "matlab",          # full path if not on PATH, e.g. C:\Program Files\MATLAB\R2024a\bin\matlab.exe
+    [string]$MatlabExe   = "matlab",          # full path if not on PATH, e.g. C:\Program Files\MATLAB\R2026a\bin\matlab.exe
     [Parameter(Mandatory=$true)][int]$Lanes,
     [switch]$WhatIfOnly
 )
