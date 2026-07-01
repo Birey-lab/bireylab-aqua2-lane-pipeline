@@ -18,7 +18,7 @@ The pipeline takes raw multi-frame TIFFs (calcium fluorescence movies), splits t
 
 ## Quick start (if you have lab AMI access)
 
-If you can launch from the `Windows2025-AQuA2-Pipeline-v3` AMI (`ami-03473aa6f1cc13fbc`), everything is pre-installed. The fast path:
+If you can launch from the `Windows2025-AQuA2-Pipeline-v3` AMI (`ami-03473aa6f1cc13fbc`), everything is pre-installed — **including this repo, already cloned at `C:\Users\Administrator\Documents\pipeline-repo`**. The intended update model is: launch an instance, then **`git pull` that clone on the instance** (step 3) so it picks up the latest pipeline before each run. You edit/commit code elsewhere and push; the instance only ever pulls. The fast path:
 
 1. Launch an EC2 instance from the AMI with IAM role `EC2toS3Full` attached
 2. RDP in as `Administrator`
