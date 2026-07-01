@@ -1,9 +1,14 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.8.4 (2026-07-01).
+    Version 0.8.5 (2026-07-01).
 
 .DESCRIPTION
+    v0.8.5 changes: docs-only release. AWS pricing figures reconciled to broad,
+    consistent ranges (docs/03 is the cost reference; ~$0.06/vCPU-hr + AWS
+    calculator link); intended git-pull update model documented in the README.
+    No code change. See CHANGELOG.md.
+
     v0.8.4 changes: repo-level consistency release. Run-Pipeline.ps1 itself is
     unchanged; the code change is in Launch-CFU-Lanes.ps1 (its default -LogDir now
     derives from -LaneRoot, resolving the standalone log-collision footgun in
