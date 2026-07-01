@@ -1,9 +1,22 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.8.2 (2026-07-01).
+    Version 0.8.3 (2026-07-01).
 
 .DESCRIPTION
+    v0.8.3 changes (diagnosability):
+    - Failures are now grouped by a normalized error signature in
+      failures_summary_<phase>.md, so systemic problems (e.g., 12 files with the
+      same "Index exceeds array bounds") are obvious vs one-off bad files.
+    - The end-of-run summary prints an explicit "ISSUES DETECTED" block (console +
+      RUN_SUMMARY.md) covering count mismatches, per-file failures, stalls, lanes
+      that died at startup (.err with content), and detection incompleteness --
+      instead of leaving the operator to infer problems from the raw counts.
+    - Pre-flight runs a config sanity check on parameters_for_batch.csv (frameRate
+      plausible, maxSize / spatialRes present) to catch misconfiguration up front.
+    - Companion read-only triage script Get-PipelineStatus.ps1 gives a one-command
+      health report for any project (including finished/archived runs).
+
     v0.8.2 changes (observability + correctness):
     - An INCOMPLETE detection no longer writes a PHASE_detect_COMPLETE marker; it
       writes PHASE_detect_INCOMPLETE instead (and clears any stale COMPLETE marker),
@@ -483,6 +496,31 @@ function Write-PerFileStatus {
     }
 }
 
+function Get-ErrorSignature {
+    # v0.8.3: reduce an _ERROR.txt to a normalized one-line signature so similar
+    # failures bucket together (systemic vs one-off). Handles both worker formats:
+    # cfu_lane writes an "Error: <msg>" line; aqua_lane writes getReport() output.
+    param([string]$ErrorFilePath)
+    try { $lines = Get-Content $ErrorFilePath -TotalCount 40 -ErrorAction Stop } catch { return 'unreadable error file' }
+    $msg = $null
+    foreach ($l in $lines) {
+        if ($l -match '^\s*Error:\s*(.+)$') { $msg = $Matches[1]; break }   # cfu_lane format
+    }
+    if (-not $msg) {
+        foreach ($l in $lines) {
+            $t = $l.Trim()
+            if ($t -and $t -notmatch '^(FILE|File):' -and $t -notmatch '^Time:' -and $t -notmatch '^Error using' -and $t -notmatch '^at ') { $msg = $t; break }
+        }
+    }
+    if (-not $msg) { $msg = 'unknown error' }
+    # Normalize: quoted names -> X, drive paths -> PATH, digits -> #, collapse ws, cap length.
+    $sig = $msg -replace "'[^']*'", 'X' -replace '"[^"]*"', 'X'
+    $sig = $sig -replace '[A-Za-z]:\\[^\s]*', 'PATH' -replace '\d+', '#'
+    $sig = ($sig -replace '\s+', ' ').Trim()
+    if ($sig.Length -gt 100) { $sig = $sig.Substring(0, 100) }
+    return $sig
+}
+
 function Save-FailuresSummary {
     param([string]$Phase, [string]$ResultsDir)
 
@@ -498,6 +536,14 @@ function Save-FailuresSummary {
     [void]$summary.Add("# Failures during $Phase phase")
     [void]$summary.Add("")
     [void]$summary.Add("Total failed files: $($errFiles.Count)")
+    [void]$summary.Add("")
+    # v0.8.3: group by normalized error signature (systemic vs one-off at a glance)
+    $groups = $errFiles | Group-Object { Get-ErrorSignature $_.FullName } | Sort-Object Count -Descending
+    [void]$summary.Add("## Error signatures (grouped)")
+    [void]$summary.Add("")
+    foreach ($g in $groups) { [void]$summary.Add(("- **{0}x** -- {1}" -f $g.Count, $g.Name)) }
+    [void]$summary.Add("")
+    [void]$summary.Add("## Per-file detail")
     [void]$summary.Add("")
     foreach ($e in $errFiles) {
         $stem = ($e.Name -replace '_ERROR\.txt$','')
@@ -580,7 +626,8 @@ function Write-RunSummary {
     param(
         [datetime]$Started,
         [datetime]$Completed,
-        [hashtable]$Counts
+        [hashtable]$Counts,
+        [string[]]$Issues = @()
     )
     $wall = '{0:hh\:mm\:ss}' -f ($Completed - $Started)
     $boxX = '[X]'
@@ -637,6 +684,10 @@ These are compiled into ``cfu_lane.exe``. To change, edit ``C:\AQuA2\cfu_lane.m`
 | Detection failed | $($Counts['detection_fail']) |
 | CFU succeeded | $($Counts['cfu_ok']) |
 | CFU failed | $($Counts['cfu_fail']) |
+
+## Issues detected
+
+$(if ($Issues -and $Issues.Count -gt 0) { ($Issues | ForEach-Object { "- $_" }) -join "`n" } else { "None. Every phase that ran produced the expected outputs." })
 
 ## Files in this folder
 
@@ -735,6 +786,41 @@ function Show-CSVValues {
         $shown++
     }
     Write-Host ("  ({0} of {1} total rows shown; full CSV archived to per-run audit dir)" -f $shown, $rows.Count)
+}
+
+function Test-ConfigSanity {
+    # v0.8.3: cheap pre-flight sanity check on the detection CSV so a misconfigured
+    # run (stale frameRate, missing maxSize) is caught before hours of compute.
+    # Warnings only -- never blocks; the operator decides.
+    param([string]$CSVPath)
+    if (-not (Test-Path $CSVPath)) { return }
+    try { $rows = @(Import-Csv $CSVPath -ErrorAction Stop) } catch { Warn2 "config sanity: could not parse CSV."; return }
+
+    function _cv($name) {
+        $r = $rows | Where-Object { $_.Variable -and $_.Variable.Trim() -eq $name } | Select-Object -First 1
+        if ($r -and $r.File1) { return $r.File1.Trim() } else { return $null }
+    }
+
+    $warns = 0
+    $fr = _cv 'frameRate'
+    if (-not $fr) {
+        Warn2 "config sanity: no 'frameRate' row found -- detection timing may be wrong."; $warns++
+    } else {
+        $frNum = 0.0
+        if ([double]::TryParse($fr, [ref]$frNum)) {
+            if ($frNum -le 0 -or $frNum -gt 1.0) {
+                $hz = if ($frNum -gt 0) { [math]::Round(1.0 / $frNum, 2) } else { '?' }
+                Warn2 ("config sanity: frameRate={0} s/frame is outside the usual 0.001-1.0 range (~{1} Hz). Confirm it matches acquisition." -f $fr, $hz); $warns++
+            }
+        } else {
+            Warn2 ("config sanity: frameRate='{0}' is not numeric." -f $fr); $warns++
+        }
+    }
+    if (-not (_cv 'maxSize'))    { Warn2 "config sanity: no 'maxSize' row found (hyperactive files can hang at maxSize=inf)."; $warns++ }
+    if (-not (_cv 'spatialRes')) { Warn2 "config sanity: no 'spatialRes' row found -- event areas will be wrong."; $warns++ }
+
+    if ($warns -eq 0) { OK2 "config sanity: frameRate / maxSize / spatialRes present and plausible." }
+    else { Warn2 ("config sanity: {0} warning(s) above -- review the CSV before proceeding." -f $warns) }
 }
 
 function Get-CSVKeyValues {
@@ -1066,6 +1152,8 @@ if ($Detect) {
     $resolvedCSV = Resolve-ConfigCSV -ExplicitCSV $ConfigCSV
     Write-Host ""
     Show-CSVValues -CSVPath $resolvedCSV -Label 'Detection parameters in effect'
+    Write-Host ""
+    Test-ConfigSanity -CSVPath $resolvedCSV
     Write-Host ""
     if ($resolvedCSV -ne "C:\AQuA2\cfg\parameters_for_batch.csv") {
         Note "  (will be copied to C:\AQuA2\cfg\parameters_for_batch.csv at detection start; existing backed up)"
@@ -2124,10 +2212,29 @@ $stalledTIFFs   = @(Get-ChildItem $paths['lanes']     -Recurse -File -Include *.
                     Where-Object { $_.Directory.FullName -match '\\_stalled(\\|$)' })
 $stalledCFU     = @(Get-ChildItem $paths['CFU_lanes'] -Recurse -File -Filter "_STALLED_*.txt" -ErrorAction SilentlyContinue)
 
+# v0.8.3: assemble an explicit issues list so problems surface instead of hiding in the counts.
+$issues = New-Object System.Collections.Generic.List[string]
+if ($detectionIncomplete) { [void]$issues.Add("Detection did NOT complete for all real inputs this run (CFU/Consolidate/Upload were gated off).") }
+if ($Detect -and $inputCount -gt 0 -and $counts['detection_ok'] -lt $inputCount) {
+    [void]$issues.Add(("Detection produced {0} _AQuA2.mat for {1} input TIFFs ({2} missing)." -f $counts['detection_ok'], $inputCount, ($inputCount - $counts['detection_ok'])))
+}
+if ($CFU -and $counts['detection_ok'] -gt 0 -and $counts['cfu_ok'] -lt $counts['detection_ok']) {
+    [void]$issues.Add(("CFU produced {0} _res_cfu.mat for {1} detection outputs ({2} missing)." -f $counts['cfu_ok'], $counts['detection_ok'], ($counts['detection_ok'] - $counts['cfu_ok'])))
+}
+if ($counts['detection_fail'] -gt 0) { [void]$issues.Add(("{0} detection per-file failure(s) -- see failures_summary_detection.md." -f $counts['detection_fail'])) }
+if ($counts['cfu_fail'] -gt 0)       { [void]$issues.Add(("{0} CFU per-file failure(s) -- see failures_summary_cfu.md." -f $counts['cfu_fail'])) }
+if ($stalledTIFFs.Count -gt 0) { [void]$issues.Add(("{0} detection file(s) quarantined to _stalled\ by stall auto-skip." -f $stalledTIFFs.Count)) }
+if ($stalledCFU.Count -gt 0)   { [void]$issues.Add(("{0} CFU stall marker(s) (_STALLED_*.txt) under CFU_lanes\." -f $stalledCFU.Count)) }
+$errWithContent = @()
+$errWithContent += @(Get-ChildItem (Join-Path $paths['PreCFU'] '_lane_logs') -Filter *.err -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 })
+$errWithContent += @(Get-ChildItem (Join-Path $paths['CFU_lanes'] '_logs') -Filter *.err -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 })
+if ($errWithContent.Count -gt 0) { [void]$issues.Add(("{0} lane .err file(s) have content (a worker may have failed at startup) -- inspect them." -f $errWithContent.Count)) }
+$issues = @($issues)
+
 # Write machine-readable + human-readable summaries
 Hdr "Writing audit trail"
 Write-RunManifest -Started $pipelineStart -Completed $completedAt -Counts $counts
-Write-RunSummary  -Started $pipelineStart -Completed $completedAt -Counts $counts
+Write-RunSummary  -Started $pipelineStart -Completed $completedAt -Counts $counts -Issues $issues
 
 Hdr "PIPELINE COMPLETE"
 Note ("Total wall-clock:   {0:hh\:mm\:ss}" -f $total)
@@ -2141,6 +2248,19 @@ if ($Consolidate -and (Test-Path $paths['for_upload'])) {
     Note ("  for_upload:       {0} TIFFs, {1} PostCFU .mat (ready for S3)" -f $upTiffCount, $upPostCount)
 }
 Note ("Master log:         {0}" -f $masterLog)
+
+# ===== Issues summary: explicit, so problems don't hide in the counts (v0.8.3) =====
+Write-Host ""
+if ($issues.Count -gt 0) {
+    Write-Host "================================================================" -ForegroundColor Red
+    Write-Host (" ISSUES DETECTED ({0})" -f $issues.Count) -ForegroundColor Red
+    Write-Host "================================================================" -ForegroundColor Red
+    foreach ($it in $issues) { Write-Host ("  - {0}" -f $it) -ForegroundColor Red }
+    Write-Host ""
+    Write-Host ("  Full triage: .\Get-PipelineStatus.ps1 -ProjectRoot `"{0}`"" -f $projectRoot) -ForegroundColor Yellow
+} else {
+    Write-Host "[OK] No issues detected -- every phase that ran produced the expected outputs." -ForegroundColor Green
+}
 
 # ===== Stalled files: PROMINENT visual indication =====
 if ($stalledTIFFs.Count -gt 0 -or $stalledCFU.Count -gt 0) {

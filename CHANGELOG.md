@@ -11,6 +11,25 @@ parameters).
 
 ---
 
+## v0.8.3 — 2026-07-01
+
+Diagnosability: make it fast to pinpoint *why* a run misbehaved.
+
+- **New read-only triage script `powershell/Get-PipelineStatus.ps1`.** One command →
+  counts + mismatches (inputs vs detection vs CFU), failures grouped by error signature,
+  stalled/quarantined files, lanes that died at startup (`.err` with content), orphaned
+  worker processes, free disk, phase-marker consistency (incl. `PHASE_detect_INCOMPLETE`),
+  and the nCFU distribution. Works on any project, including finished/archived runs. Exits
+  0 clean / 1 if any issue category triggered.
+- **Failures grouped by normalized error signature** in `failures_summary_<phase>.md`, so
+  "12 files: Index exceeds array bounds" (systemic) is distinguishable from one-offs.
+- **End-of-run "ISSUES DETECTED" block** (console + `RUN_SUMMARY.md`) covering count
+  mismatches, per-file failures, stalls, startup `.err` files, and detection incompleteness
+  — problems are stated explicitly instead of inferred from raw counts. Points at
+  `Get-PipelineStatus.ps1` for full triage.
+- **Config sanity pre-flight** on `parameters_for_batch.csv` (frameRate plausible, maxSize /
+  spatialRes present) to catch misconfiguration before a long run.
+
 ## Unreleased
 
 Documentation consistency pass (no code/behavior changes):
