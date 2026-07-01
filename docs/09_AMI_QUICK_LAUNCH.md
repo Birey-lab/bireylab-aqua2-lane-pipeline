@@ -66,12 +66,12 @@ You do **not** need to install anything to start a typical run.
 
 The `Run-Pipeline.ps1` orchestrator's Auto-Size phase probes your largest input TIFF and chooses a safe lane count automatically. You only need to pick the instance type. Rough sizing:
 
-| Dataset size | Instance type | vCPU | RAM | Cost/hr (us-east-1) | Typical wall-clock |
+| Dataset size | Instance type | vCPU | RAM | ~$/hr (approx.) | Typical wall-clock |
 |---|---|---|---|---|---|
-| <30 files (smoke test, 5x assembloids) | `r7i.2xlarge` | 8 | 64 GB | ~$0.53 | 1-2 hours |
-| 30-100 files (small to medium) | `r7a.4xlarge` | 16 | 128 GB | ~$1.02 | 1-3 hours |
-| 100-500 files (medium) | `r7a.12xlarge` | 48 | 384 GB | ~$3.04 | 2-5 hours |
-| 500-1500 files (large 20x runs) | `r7a.24xlarge` | 96 | 768 GB | ~$6.09 | 6-20 hours |
+| <30 files (smoke test, 5x assembloids) | `r7i.2xlarge` | 8 | 64 GB | ~$0.5 | 1-2 hours |
+| 30-100 files (small to medium) | `r7a.4xlarge` | 16 | 128 GB | ~$1 | 1-3 hours |
+| 100-500 files (medium) | `r7a.12xlarge` | 48 | 384 GB | ~$3 | 2-5 hours |
+| 500-1500 files (large 20x runs) | `r7a.24xlarge` | 96 | 768 GB | ~$6 | 6-20 hours |
 
 Empirical rule from prior runs: detection on a 20x TIFF takes 15-30 min on one core, with peak RAM ~12-15 GB per lane. Instance RAM ÷ 15 GB ≈ max safe lane count. The Auto-Size phase doesn't exceed this.
 

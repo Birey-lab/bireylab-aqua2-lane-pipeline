@@ -11,6 +11,19 @@ parameters).
 
 ---
 
+## Unreleased
+
+Docs only (no code/behavior change):
+- **AWS pricing reconciled to broad ranges.** `docs/08`'s outlier figures (r7a.8xlarge
+  "$1.70", r7a.24xlarge "$5") now match the rest of the docs; operator-facing "pick an
+  instance" tables (`docs/08`, `docs/09`) use rounded broad values (~$0.5/$1/$2/$3/$6/hr).
+  `docs/03` is now the single cost reference with a **≈ $0.06/vCPU-hr** heuristic and a link
+  to the AWS pricing calculator; other docs defer to it. Verify current rates before a run.
+- Fixed a stray "CFU is memory-bound" in `docs/08`'s cost table (now I/O-bound, consistent
+  with `docs/02`/`docs/03`).
+- README states the intended update model explicitly: the AMI ships this repo cloned, and the
+  instance `git pull`s it before each run (you push from elsewhere; the instance only pulls).
+
 ## v0.8.4 — 2026-07-01
 
 - **`Launch-CFU-Lanes.ps1`**: the default `-LogDir` now derives from `-LaneRoot`

@@ -73,9 +73,9 @@ If you're going to run the R analysis, **open the R script you'll use and update
 
 | Dataset size | Recommended instance |
 |---|---|
-| < 100 TIFFs, exploratory | r7i.2xlarge (8 vCPU, 64 GB, ~$0.53/hr) |
-| 100-500 TIFFs | r7i.8xlarge or r7a.8xlarge (32 vCPU, 256 GB, ~$1.70/hr) |
-| 500-2000 TIFFs (production) | r7a.24xlarge (96 vCPU, 768 GB, ~$5/hr) |
+| < 100 TIFFs, exploratory | r7i.2xlarge (8 vCPU, 64 GB, ~$0.5/hr) |
+| 100-500 TIFFs | r7a.8xlarge (32 vCPU, 256 GB, ~$2/hr) |
+| 500-2000 TIFFs (production) | r7a.24xlarge (96 vCPU, 768 GB, ~$6/hr) |
 | > 2000 TIFFs | r7a.48xlarge or split into multiple machines |
 
 Downsizing after detection is OK if CFU and R analysis are smaller workloads. Detection is the bottleneck — size for that.
@@ -83,9 +83,9 @@ Downsizing after detection is OK if CFU and R analysis are smaller workloads. De
 ### 1.6 — Cost estimate
 
 Rough rule: `total_cost ≈ (instance_$/hr) × (TIFFs / 30)` for 32-lane detection on r7a.24xlarge. Check before launching:
-- 100 TIFFs × $5/hr / 30 = $17
-- 1000 TIFFs × $5/hr / 30 = $170
-- 2000 TIFFs × $5/hr / 30 = $330
+- 100 TIFFs × ~$6/hr / 30 ≈ $20
+- 1000 TIFFs × ~$6/hr / 30 ≈ $200
+- 2000 TIFFs × ~$6/hr / 30 ≈ $400
 
 Plus a few dollars for CFU and R phases. Plus S3 storage on the back end (typically $0.023/GB/month for outputs).
 
@@ -379,11 +379,11 @@ After fixing the regex, re-source the script and re-check the audit. Iterate unt
 
 | Stage | Instance size you really need | Hourly cost (approx) |
 |---|---|---|
-| LIF extraction (Fiji) | Any. Fiji uses 1-2 cores. | $0.53/hr on r7i.2xlarge is plenty |
+| LIF extraction (Fiji) | Any. Fiji uses 1-2 cores. | ~$0.5/hr on r7i.2xlarge is plenty |
 | TIFF consolidation + lane split | Any. Pure file IO. | Same |
-| Detection (the bottleneck) | Big. 32-96 cores, 128-768 GB RAM. | $1.70-$5/hr |
-| CFU clustering | Medium. Memory-bound, ~16-28 cores. | $1.70/hr is enough |
-| R analysis | Small. Single-threaded for most ops. | $0.53/hr is fine |
+| Detection (the bottleneck) | Big. 32-96 cores, 128-768 GB RAM. | ~$2-$6/hr |
+| CFU clustering | Medium. I/O-bound, ~16-28 cores. | ~$2/hr is enough |
+| R analysis | Small. Single-threaded for most ops. | ~$0.5/hr is fine |
 | S3 upload | Any. Network-bound. | Same |
 
 **Practical strategy**: launch the big instance for detection only. Stop the instance the moment detection is done (snapshot first if you want to come back). Resume on a smaller instance for CFU + R + upload.

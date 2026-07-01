@@ -41,6 +41,8 @@ EC2 pricing is **per second of wall-clock**, regardless of whether you're using 
 
 (`r7a` = AMD-based, slightly cheaper; `r7i` = Intel. Performance differences are minor for this workload.)
 
+> **Pricing basis (read once).** These are **approximate** on-demand US-region figures for 2026 and drift over time. Rule of thumb: **≈ $0.06/vCPU-hour** for `r7a` (`r7i` is similar), so cost scales roughly linearly with vCPU count — about **~$0.5/hr at 8 vCPU up to ~$12/hr at 192 vCPU** (`r7a.48xlarge`). **This table is the single cost reference for the repo**; other docs quote rounded/broad versions of it. Always confirm the current rate in the [AWS pricing calculator](https://calculator.aws/) before committing to a long run (and consider Spot for interruptible work).
+
 **Two ways to lose money:**
 1. **Over-provision:** running r7a.32xlarge for an R analysis that needs only 64 GiB → wasting ~$7/hour times hours
 2. **Under-provision then crash:** picking r7a.4xlarge for a high-RAM detection run, OOMing, losing partial progress, having to resize and restart
