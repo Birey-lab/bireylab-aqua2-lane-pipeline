@@ -10,7 +10,9 @@ param(
     [string]$LaneRoot = 'C:\Users\Administrator\Documents\CFU_lanes',
     [string]$Post     = 'C:\Users\Administrator\Documents\POST',
     [string]$ExePath  = 'C:\AQuA2\compiled\cfu_lane.exe',
-    [string]$LogDir   = 'C:\Users\Administrator\Documents\CFU_lanes\_logs',
+    # Default derives from -LaneRoot so distinct lane roots get distinct logs
+    # (avoids the old fixed-default collision; see docs/06 Pitfall #7).
+    [string]$LogDir   = (Join-Path $LaneRoot '_logs'),
     [switch]$WhatIfOnly
 )
 
