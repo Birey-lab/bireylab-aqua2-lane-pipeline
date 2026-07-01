@@ -2,7 +2,7 @@
 
 The day-to-day procedure for running the pipeline on a sized instance. Assumes you've completed [`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md) and [`03_SIZING_AND_RESIZING_GUIDE.md`](03_SIZING_AND_RESIZING_GUIDE.md) — that is, your instance is provisioned and (if needed) sized for your data.
 
-**As of orchestrator v0.8.1 (June 2026)**, the entire pipeline is driven by a single PowerShell script — `powershell/Run-Pipeline.ps1` — that handles all five phases (Split → Detect → CFU → Consolidate → Upload), per-run audit trails, three-stage stall detection, resume guards, and a detection-completeness gate. This document is structured around that orchestrator. See [`../CHANGELOG.md`](../CHANGELOG.md) for what changed between versions.
+**As of orchestrator v0.8.2 (July 2026)**, the entire pipeline is driven by a single PowerShell script — `powershell/Run-Pipeline.ps1` — that handles all five phases (Split → Detect → CFU → Consolidate → Upload), per-run audit trails, three-stage stall detection, resume guards, and a detection-completeness gate. This document is structured around that orchestrator. See [`../CHANGELOG.md`](../CHANGELOG.md) for what changed between versions.
 
 If you need to run the underlying scripts manually (debugging an opaque failure, redistributing pathological files, or testing with non-standard inputs), see [Appendix Z](#appendix-z-manual-workflow-pre-v07-or-debugging) for the manual workflow. For >95% of routine runs, **you only need sections A–E**.
 
@@ -50,7 +50,7 @@ aws configure set default.s3.max_queue_size 10000
 cd C:\Users\Administrator\Documents\pipeline-repo
 git pull
 git describe --tags
-# Should show v0.8.1 or later
+# Should show v0.8.2 or later
 ```
 
 ### A.3 — Verify the stack

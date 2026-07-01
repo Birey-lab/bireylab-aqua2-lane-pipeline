@@ -11,6 +11,27 @@ parameters).
 
 ---
 
+## v0.8.2 — 2026-07-01
+
+Observability + a small correctness follow-up to the completeness gate. Added CI.
+
+**Orchestrator (`Run-Pipeline.ps1`):**
+- An **incomplete detection no longer writes a `PHASE_detect_COMPLETE` marker** — it
+  writes `PHASE_detect_INCOMPLETE.txt` and clears any stale COMPLETE marker. Previously
+  a partial run left a COMPLETE marker, so the next run's plan summary showed it as
+  "PREVIOUSLY COMPLETED."
+- **Consolidate prints periodic progress** (every 100 stems) so a large run isn't
+  silent for minutes during hardlinking.
+
+**Scripts:**
+- `Launch-Lanes-Exe.ps1` now reports **actual free disk on C:** instead of the hardcoded
+  "you have ~1 TB" claim.
+
+**CI:**
+- Added `.github/workflows/ci.yml`: parses every `.ps1` with the PowerShell AST parser
+  (fails on syntax errors — the check that can't run on a non-Windows dev machine) and
+  runs PSScriptAnalyzer informationally. Guards the orchestration layer on every push/PR.
+
 ## v0.8.1 — 2026-06-29
 
 Orchestrator correctness fixes and a documentation pass. No new phases.
