@@ -11,7 +11,7 @@ parameters).
 
 ---
 
-## Unreleased
+## v0.8.4 — 2026-07-01
 
 - **`Launch-CFU-Lanes.ps1`**: the default `-LogDir` now derives from `-LaneRoot`
   (`<LaneRoot>\_logs`) instead of a fixed `C:\...\CFU_lanes\_logs`, so standalone CFU

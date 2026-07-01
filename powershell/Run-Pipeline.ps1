@@ -1,9 +1,14 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.8.3 (2026-07-01).
+    Version 0.8.4 (2026-07-01).
 
 .DESCRIPTION
+    v0.8.4 changes: repo-level consistency release. Run-Pipeline.ps1 itself is
+    unchanged; the code change is in Launch-CFU-Lanes.ps1 (its default -LogDir now
+    derives from -LaneRoot, resolving the standalone log-collision footgun in
+    docs/06 Pitfall #7). Docs + CHANGELOG consistency pass. See CHANGELOG.md.
+
     v0.8.3 changes (diagnosability):
     - Failures are now grouped by a normalized error signature in
       failures_summary_<phase>.md, so systemic problems (e.g., 12 files with the
