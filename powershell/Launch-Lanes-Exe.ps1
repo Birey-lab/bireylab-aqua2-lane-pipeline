@@ -37,7 +37,11 @@ $logDir = Join-Path $ResultsRoot "_lane_logs"
 if (-not $WhatIfOnly -and -not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
 Write-Host "`nLaunching $Lanes lane(s) from: $ExePath"
-Write-Host "Measured ~12 GB/lane -> ~$([math]::Round($Lanes*15)) GB budgeted (you have ~1 TB).  Logs: $logDir`n"
+# Report the actual free space on this instance rather than a hardcoded assumption.
+$freeGB = try { [math]::Round((Get-PSDrive C).Free / 1GB, 0) } catch { $null }
+$budgetGB = [math]::Round($Lanes * 15)
+$freeStr = if ($null -ne $freeGB) { "$freeGB GB free on C:" } else { "free space unknown" }
+Write-Host "Rough budget ~15 GB/lane -> ~$budgetGB GB for $Lanes lanes ($freeStr).  Logs: $logDir`n"
 
 $started = @()
 for ($i=1; $i -le $Lanes; $i++) {

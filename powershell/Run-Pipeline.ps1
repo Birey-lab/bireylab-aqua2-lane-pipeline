@@ -1,9 +1,16 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.8.1 (2026-06-29).
+    Version 0.8.2 (2026-07-01).
 
 .DESCRIPTION
+    v0.8.2 changes (observability + correctness):
+    - An INCOMPLETE detection no longer writes a PHASE_detect_COMPLETE marker; it
+      writes PHASE_detect_INCOMPLETE instead (and clears any stale COMPLETE marker),
+      so the plan-summary "PREVIOUSLY COMPLETED" hint can't misrepresent a partial run.
+    - Consolidate prints periodic progress (every 100 stems) so a large run isn't
+      silent for minutes during hardlinking.
+
     v0.8.1 changes (correctness):
     - Consolidate and Upload now honor the detection-completeness gate. v0.8.0
       refused CFU on an incomplete detection but still consolidated (and could
@@ -1486,9 +1493,14 @@ if ($Detect) {
     # Failures summary (collect _ERROR.txt files into per-run audit dir)
     Save-FailuresSummary -Phase 'detection' -ResultsDir $paths['PreCFU']
 
-    # Phase-complete markers: write to BOTH top-level (for resume) AND per-run (for history)
+    # Phase-complete markers: write to BOTH top-level (for resume) AND per-run (for history).
+    # v0.8.2: an INCOMPLETE detection must NOT leave a PHASE_detect_COMPLETE marker -- that
+    # marker drives the "PREVIOUSLY COMPLETED" plan-summary hint and reads as a finished phase.
+    # Write a distinct _INCOMPLETE marker instead (and remove any stale COMPLETE marker), so
+    # the run's true state is unambiguous on re-run.
+    $statusWord = if ($detectionIncomplete) { 'INCOMPLETE' } else { 'completed' }
     $markerContent = @"
-Detection phase completed at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+Detection phase $statusWord at $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
 Files OK:                $finalDone
 Files failed (this run): $finalFailNew
 Files failed (total _ERROR.txt): $finalFailRaw
@@ -1499,8 +1511,16 @@ Stall warnings issued:   $((Get-Content $stallLogPath -ErrorAction SilentlyConti
 Config CSV in effect:    $(if ($script:resolvedConfigCSV) { $script:resolvedConfigCSV } else { 'C:\AQuA2\cfg\parameters_for_batch.csv (default)' })
 Run audit dir:           $runAuditDir
 "@
-    $markerContent | Out-File $markerDetect -Encoding UTF8
-    $markerContent | Out-File (Join-Path $runAuditDir 'PHASE_detect_COMPLETE.txt') -Encoding UTF8
+    if ($detectionIncomplete) {
+        $incMarker = Join-Path $paths['logs'] 'PHASE_detect_INCOMPLETE.txt'
+        $markerContent | Out-File $incMarker -Encoding UTF8
+        $markerContent | Out-File (Join-Path $runAuditDir 'PHASE_detect_INCOMPLETE.txt') -Encoding UTF8
+        if (Test-Path $markerDetect) { Remove-Item $markerDetect -Force -ErrorAction SilentlyContinue }
+        Warn2 "Detection incomplete: wrote PHASE_detect_INCOMPLETE.txt (no COMPLETE marker)."
+    } else {
+        $markerContent | Out-File $markerDetect -Encoding UTF8
+        $markerContent | Out-File (Join-Path $runAuditDir 'PHASE_detect_COMPLETE.txt') -Encoding UTF8
+    }
 }
 
 # ==========================================================
@@ -1870,7 +1890,11 @@ elseif ($Consolidate) {
     $preCopied = 0
     $preSkipped = 0
     $preFiles = 0
+    $stemIdx = 0
     foreach ($matFile in $allMatFiles) {
+        # v0.8.2: periodic progress so a large consolidation isn't silent for minutes
+        $stemIdx++
+        if ($stemIdx % 100 -eq 0) { Note ("  ... {0}/{1} stems consolidated" -f $stemIdx, $allMatFiles.Count) }
         $stem = ($matFile.Name -replace '_AQuA2\.mat$','')
         $destDir = Join-Path $upPreCFU $stem
         if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
