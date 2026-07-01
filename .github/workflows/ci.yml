@@ -1,0 +1,52 @@
+name: CI
+
+# Lightweight checks for the PowerShell orchestration layer. The workers are
+# compiled MATLAB (.exe) and the analysis is R; neither is built here. This
+# guards the .ps1 scripts, which is where most day-to-day edits land and which
+# can't be parse-checked on a non-Windows dev machine.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  powershell-syntax:
+    name: PowerShell syntax check
+    runs-on: ubuntu-latest   # GitHub-hosted ubuntu ships pwsh preinstalled
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse all .ps1 files (fails on syntax errors)
+        shell: pwsh
+        run: |
+          $failed = $false
+          $scripts = Get-ChildItem -Recurse -Filter *.ps1
+          if (-not $scripts) { Write-Host 'No .ps1 files found.'; exit 0 }
+          foreach ($s in $scripts) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($s.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors -and $errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "::error file=$($s.FullName)::$($errors.Count) parse error(s)"
+              foreach ($e in $errors) { Write-Host ("  line {0}: {1}" -f $e.Extent.StartLineNumber, $e.Message) }
+            } else {
+              Write-Host "OK  $($s.FullName)"
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: PSScriptAnalyzer (informational, non-blocking)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          Import-Module PSScriptAnalyzer
+          $findings = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Warning,Error
+          if ($findings) {
+            $findings | Sort-Object ScriptName, Line | Format-Table -AutoSize ScriptName, Line, Severity, RuleName, Message | Out-String -Width 200 | Write-Host
+            Write-Host "PSScriptAnalyzer found $($findings.Count) item(s) (informational; does not fail the build)."
+          } else {
+            Write-Host "PSScriptAnalyzer: clean."
+          }
