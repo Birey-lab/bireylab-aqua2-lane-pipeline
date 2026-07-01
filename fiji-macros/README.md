@@ -1,14 +1,19 @@
 # Fiji Macros for BireyLab AQuA2 Pipeline
 
-Three custom `.ijm` macros for the imaging pipeline. As of v3.0 (2026-06-04), **every operational parameter is prompted at runtime** — no editing source files just to change a frame count or a trim window. Cosmetic settings are controlled via **preset modes** where they exist.
+Custom `.ijm` macros for the imaging pipeline. **Every operational parameter is prompted at runtime** — no editing source files just to change a frame count or a trim window. Cosmetic settings are controlled via **preset modes** where they exist.
 
-## The three macros
+## Macros
 
 | Macro | Purpose | Notable features |
 |---|---|---|
-| `LIF_Extractor.ijm` | Recursive `.lif` → TIFF with optional trim | Resume-safe (3 levels), optional UNTRIMMED-only mode, sibling-or-mirrored output, configurable rate-mismatch policy |
-| `AQUA2_Movie_Timestamp.ijm` | Add elapsed-time stamps to AQuA2 output movies | Preset modes (Presentation / Compact / Minimal / Custom), GIF or AVI output, real-time-correct timestamps even with speedup |
-| `TrimTIF_Frames.ijm` | Trim FINAL N frames from existing TIFFs | Simple prompts, preserves frame-interval metadata |
+| **`LIF_Extract_and_Trim.ijm`** | **Recommended input-prep tool.** `.lif` (or existing TIFFs) → raw (UNTRIMMED) + trimmed TIFFs, with the **measured Hz appended to every filename** (`_1.55Hz`) for the R parser | Two input modes, flexible trim (middle / keep-final / keep-first, in seconds or frames), dry-run preflight, resume-safe, rate-mismatch policy, TileScan filter. Consolidates the two macros below. |
+| `AQUA2_Movie_Timestamp.ijm` | Add elapsed-time stamps to AQuA2 **output** movies (post-detection, presentation only) | Preset modes (Presentation / Compact / Minimal / Custom), GIF or AVI output, real-time-correct timestamps even with speedup |
+| `LIF_Extractor.ijm` | *Superseded by `LIF_Extract_and_Trim.ijm`.* Recursive `.lif` → TIFF with optional trim | Kept as a proven fallback until the consolidated tool is smoke-tested in your Fiji |
+| `TrimTIF_Frames.ijm` | *Superseded by `LIF_Extract_and_Trim.ijm`* (its "keep FINAL N" trim is now a mode there). Trim FINAL N frames from existing TIFFs | Kept as a proven fallback |
+
+> **Important — inputs stay bit-exact.** `LIF_Extract_and_Trim.ijm` never alters pixel data (no contrast/RGB/annotation) because its outputs feed AQuA2. The Hz label lives **only in the filename**, never burned into the image. Burning a visible timestamp is strictly the job of `AQUA2_Movie_Timestamp.ijm`, which runs on detection *outputs*, not inputs.
+>
+> The consolidated macro has not yet been smoke-tested in Fiji (ImageJ macros aren't covered by this repo's CI). **Run it on one `.lif` and confirm the outputs before a large batch**; the two superseded macros remain as a fallback.
 
 ## Design principles
 
@@ -28,7 +33,23 @@ Three ways:
 
 ## What each macro asks you
 
-### `LIF_Extractor.ijm`
+### `LIF_Extract_and_Trim.ijm` (recommended)
+
+1. **Input mode** — LIF files (extract raw + trimmed) or existing TIFF stacks (trim + Hz-label)
+2. **Input folder** — recursed for `.lif`s (LIF mode) or scanned for `.tif`/`.tiff` (TIFF mode)
+3. **Settings dialog**:
+   - Save full UNTRIMMED copy (on/off)
+   - Trim mode: No trim / Middle window / Keep FINAL / Keep FIRST
+   - Trim start (s) and trim amount, with unit = seconds or frames
+   - Append measured `_<Hz>Hz` to filenames (on/off) + decimal places
+   - (LIF only) output location, rate-mismatch policy, TileScan filter
+   - **Dry run** (report the plan, write nothing)
+4. **Output folder** — if mirrored (LIF) or for TIFF mode
+5. **Confirmation dialog** — summarizes the plan; Cancel aborts before anything is written
+
+Outputs land in `UNTRIMMED/` and/or `TRIMMED/` subfolders, each file named `<series>_<Hz>Hz.tif`. Defaults reproduce the lab standard (60 s starting 15 s in, measured Hz in the name). The `D:\incoming_tiffs\` you point `Run-Pipeline.ps1` at is typically the `TRIMMED/` output.
+
+### `LIF_Extractor.ijm` (superseded)
 
 1. **Choose root input folder** — recursive scan starts here
 2. **Operational dialog**:

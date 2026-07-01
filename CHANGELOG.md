@@ -11,6 +11,21 @@ parameters).
 
 ---
 
+## Unreleased
+
+- **New consolidated Fiji tool `fiji-macros/LIF_Extract_and_Trim.ijm`.** One interactive
+  macro that takes raw acquisitions to detection-ready TIFFs: `.lif` (or existing TIFFs) →
+  raw (UNTRIMMED) + trimmed copies, with the **measured acquisition rate appended to every
+  output filename** (`_1.55Hz`, end-anchored) so the downstream R parser can read it. Folds
+  in `LIF_Extractor.ijm` (recurse/resume/rate-policy/TileScan) and `TrimTIF_Frames.ijm`
+  (keep-final-N, now one of several flexible trim modes), and adds a dry-run preflight +
+  confirmation. **Pixel data is never modified** (Hz lives only in the filename — the
+  outputs must feed AQuA2 bit-exact); visible timestamp burning stays in the separate,
+  post-detection `AQUA2_Movie_Timestamp.ijm`.
+  - `LIF_Extractor.ijm` and `TrimTIF_Frames.ijm` are marked **superseded** but kept as
+    proven fallbacks until the consolidated macro is smoke-tested in Fiji (ImageJ macros are
+    not covered by CI). `docs/08` Step 1 and `fiji-macros/README.md` updated to point at it.
+
 ## v0.8.5 — 2026-07-01
 
 Docs only (no code/behavior change):

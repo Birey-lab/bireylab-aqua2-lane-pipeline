@@ -169,7 +169,7 @@ Either way, what each step does:
 
 ### Step 1 — `.lif` to TIFF (Fiji)
 
-Run [`LIF_Extractor.ijm`](../fiji-macros/LIF_Extractor.ijm) in Fiji. Defaults to BireyLab standard: 60s trim @ 15s start, sibling output, warn-on-rate-mismatch.
+Run [`LIF_Extract_and_Trim.ijm`](../fiji-macros/LIF_Extract_and_Trim.ijm) in Fiji (the consolidated input-prep tool; the older `LIF_Extractor.ijm` still works as a fallback). Defaults to BireyLab standard: 60 s trim @ 15 s start, sibling output, warn-on-rate-mismatch. It also **appends the measured acquisition rate to each output filename** (e.g. `_1.55Hz`), which the downstream R analysis parses — so you don't have to add it by hand. Pixel data is never modified.
 
 **Read the extraction log** at `<root>/extraction_log_<timestamp>.txt`. Look for:
 - `[FAIL]` — corrupt `.lif` files that need investigation
