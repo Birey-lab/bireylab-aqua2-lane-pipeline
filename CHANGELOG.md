@@ -11,7 +11,9 @@ parameters).
 
 ---
 
-## Unreleased
+## v0.9.0 — 2026-07-01
+
+New Fiji input-prep tooling. (The orchestrator `Run-Pipeline.ps1` is unchanged since v0.8.5.)
 
 - **New consolidated Fiji tool `fiji-macros/LIF_Extract_and_Trim.ijm`.** One interactive
   macro that takes raw acquisitions to detection-ready TIFFs: `.lif` (or existing TIFFs) →
@@ -22,18 +24,22 @@ parameters).
   confirmation. **Pixel data is never modified** (Hz lives only in the filename — the
   outputs must feed AQuA2 bit-exact); visible timestamp burning stays in the separate,
   post-detection `AQUA2_Movie_Timestamp.ijm`.
-  - **Validated on a real 31-series LIF** (assembloid calcium data): the Hz + trim math was
-    run headless against real Bio-Formats metadata — filenames labelled correctly (`_5.00Hz`
-    and `_18.06Hz`; the file has mixed rates), trim windows exact (60.0 s kept at both rates).
-    Surfaced and **hardened a latent edge case**: a recording shorter than the trim-start
-    (also present in the old v3.0 extractor) would compute an invalid `Make Substack` range;
-    the trimmed copy is now skipped with `[WARN-LEN]`. NOTE: the actual ImageJ import/save
-    path could not be exercised in the dev env (both local Fiji installs are broken for
-    headless Bio-Formats import); those I/O ops are unchanged from the proven v3.0 extractor.
-    A Fiji smoke-test on one `.lif` is still the final gate before tagging.
-  - `LIF_Extractor.ijm` and `TrimTIF_Frames.ijm` are marked **superseded** but kept as
-    proven fallbacks until the consolidated macro is smoke-tested in Fiji (ImageJ macros are
-    not covered by CI). `docs/08` Step 1 and `fiji-macros/README.md` updated to point at it.
+  - **Validated on a real 31-series LIF** (assembloid calcium data). Hz + trim math verified
+    against real Bio-Formats metadata across all series: filenames labelled correctly
+    (`_5.00Hz` and `_18.06Hz` — the file has mixed rates), trim windows exact (60.0 s kept at
+    both rates). Via the Bio-Formats **API** (headless), a full series was extracted and the
+    TIFF round-trip confirmed **bit-exact (max pixel diff 0 across all 601 frames)** with the
+    frame interval preserved — i.e. raw data is not altered. Surfaced and **hardened a latent
+    edge case** (also in the old v3.0 extractor): a recording shorter than the trim-start
+    computed an invalid `Make Substack` range; the trimmed copy is now skipped with
+    `[WARN-LEN]`.
+  - Caveat: the interactive Bio-Formats *importer plugin* cannot run **headless** (a
+    JVM `VerifyError` in its dialog code, reproduced on three Fiji builds incl. a fresh
+    install — a headless-only limitation, not a corrupt install); it works normally in the
+    Fiji GUI, which is how the macro is used and how v3.0 runs in production. `LIF_Extractor.ijm`
+    and `TrimTIF_Frames.ijm` are marked **superseded** but retained as proven fallbacks pending
+    a user GUI confirmation run; they'll be removed in a follow-up. `docs/08` Step 1 and
+    `fiji-macros/README.md` point at the new tool.
 
 ## v0.8.5 — 2026-07-01
 
