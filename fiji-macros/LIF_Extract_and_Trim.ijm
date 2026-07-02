@@ -376,24 +376,30 @@ function processLIF(lifPath, fname, dstParent, idx, total) {
 
         // TRIMMED
         if (doTrim && !alreadyExtracted(trimmedDir, cleanPeek)) {
-            fr = computeTrimFrames(totalFrames, fi);   // returns "start,end,short"
+            fr = computeTrimFrames(totalFrames, fi);   // "start,end,short,bad"
             parts = split(fr, ",");
-            startFrame = parseInt(parts[0]); endFrame = parseInt(parts[1]); shortStack = (parts[2] == "1");
-            nKeep = endFrame - startFrame + 1;
-            keptSec = d2s(nKeep * fi, 1);
-            if (DRY_RUN) {
-                print(flog, "  [DRY-T]     " + outName + ".tif | frames " + startFrame + "-" + endFrame + " (" + keptSec + "s)");
-            } else {
-                run("Make Substack...", "frames=" + startFrame + "-" + endFrame);
-                Stack.setFrameInterval(fi); Stack.setTUnit("s");
-                saveAs("Tiff", trimmedDir + outName + ".tif");
-                close();
-            }
-            if (shortStack) {
-                print(flog, "  [WARN-LEN]  " + seriesName + " | " + fpsStr + " | kept " + startFrame + "-" + endFrame + " (" + keptSec + "s) - SHORTER THAN REQUESTED");
+            startFrame = parseInt(parts[0]); endFrame = parseInt(parts[1]);
+            shortStack = (parts[2] == "1"); badTrim = (parts[3] == "1");
+            if (badTrim) {
+                print(flog, "  [WARN-LEN]  " + seriesName + " | " + fpsStr + " | recording shorter than trim start (" + TRIM_START_SEC + "s) - no trimmed copy written");
                 totalWarnings++;
             } else {
-                print(flog, "  [OK]        " + seriesName + " | " + fpsStr + " | kept " + startFrame + "-" + endFrame + " (" + keptSec + "s)");
+                nKeep = endFrame - startFrame + 1;
+                keptSec = d2s(nKeep * fi, 1);
+                if (DRY_RUN) {
+                    print(flog, "  [DRY-T]     " + outName + ".tif | frames " + startFrame + "-" + endFrame + " (" + keptSec + "s)");
+                } else {
+                    run("Make Substack...", "frames=" + startFrame + "-" + endFrame);
+                    Stack.setFrameInterval(fi); Stack.setTUnit("s");
+                    saveAs("Tiff", trimmedDir + outName + ".tif");
+                    close();
+                }
+                if (shortStack) {
+                    print(flog, "  [WARN-LEN]  " + seriesName + " | " + fpsStr + " | kept " + startFrame + "-" + endFrame + " (" + keptSec + "s) - SHORTER THAN REQUESTED");
+                    totalWarnings++;
+                } else {
+                    print(flog, "  [OK]        " + seriesName + " | " + fpsStr + " | kept " + startFrame + "-" + endFrame + " (" + keptSec + "s)");
+                }
             }
         } else if (!doTrim) {
             print(flog, "  [OK-UNTRIM] " + seriesName + " | " + fpsStr + " | UNTRIMMED only");
@@ -449,15 +455,21 @@ function processTiff(tifPath, fname, outRoot) {
         useFi = fi; if (useFi <= 0) useFi = 1;   // frames-based trim still works without FI
         fr = computeTrimFrames(totalFrames, useFi);
         parts = split(fr, ",");
-        startFrame = parseInt(parts[0]); endFrame = parseInt(parts[1]); shortStack = (parts[2] == "1");
-        if (DRY_RUN) print(flog, "  [DRY-T]     " + outName + ".tif | frames " + startFrame + "-" + endFrame);
-        else {
-            run("Make Substack...", "frames=" + startFrame + "-" + endFrame);
-            if (fi > 0) { Stack.setFrameInterval(fi); Stack.setTUnit("s"); }
-            saveAs("Tiff", trimmedDir + outName + ".tif"); close();
+        startFrame = parseInt(parts[0]); endFrame = parseInt(parts[1]);
+        shortStack = (parts[2] == "1"); badTrim = (parts[3] == "1");
+        if (badTrim) {
+            print(flog, "  [WARN-LEN]  " + base + " | recording shorter than trim start - no trimmed copy written");
+            totalWarnings++;
+        } else {
+            if (DRY_RUN) print(flog, "  [DRY-T]     " + outName + ".tif | frames " + startFrame + "-" + endFrame);
+            else {
+                run("Make Substack...", "frames=" + startFrame + "-" + endFrame);
+                if (fi > 0) { Stack.setFrameInterval(fi); Stack.setTUnit("s"); }
+                saveAs("Tiff", trimmedDir + outName + ".tif"); close();
+            }
+            w = "  [OK]        "; if (shortStack) { w = "  [WARN-LEN]  "; totalWarnings++; }
+            print(flog, w + base + " | frames " + startFrame + "-" + endFrame);
         }
-        w = "  [OK]        "; if (shortStack) { w = "  [WARN-LEN]  "; totalWarnings++; }
-        print(flog, w + base + " | frames " + startFrame + "-" + endFrame);
     }
     close();
     totalOK++;
@@ -496,7 +508,12 @@ function computeTrimFrames(totalFrames, fi) {
     }
     if (startFrame < 1) startFrame = 1;
     if (endFrame > totalFrames) { endFrame = totalFrames; short = 1; }
-    return "" + startFrame + "," + endFrame + "," + short;
+    // bad = the trim window starts past the end of the recording (e.g. a clip
+    // shorter than TRIM_START_SEC). Caller skips the trimmed copy instead of
+    // emitting an invalid Make Substack range.
+    bad = 0;
+    if (startFrame > totalFrames || startFrame > endFrame) bad = 1;
+    return "" + startFrame + "," + endFrame + "," + short + "," + bad;
 }
 
 // Append _<hz>Hz to a name unless it already ends that way (idempotent).

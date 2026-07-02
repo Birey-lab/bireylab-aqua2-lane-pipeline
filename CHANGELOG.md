@@ -22,6 +22,15 @@ parameters).
   confirmation. **Pixel data is never modified** (Hz lives only in the filename — the
   outputs must feed AQuA2 bit-exact); visible timestamp burning stays in the separate,
   post-detection `AQUA2_Movie_Timestamp.ijm`.
+  - **Validated on a real 31-series LIF** (assembloid calcium data): the Hz + trim math was
+    run headless against real Bio-Formats metadata — filenames labelled correctly (`_5.00Hz`
+    and `_18.06Hz`; the file has mixed rates), trim windows exact (60.0 s kept at both rates).
+    Surfaced and **hardened a latent edge case**: a recording shorter than the trim-start
+    (also present in the old v3.0 extractor) would compute an invalid `Make Substack` range;
+    the trimmed copy is now skipped with `[WARN-LEN]`. NOTE: the actual ImageJ import/save
+    path could not be exercised in the dev env (both local Fiji installs are broken for
+    headless Bio-Formats import); those I/O ops are unchanged from the proven v3.0 extractor.
+    A Fiji smoke-test on one `.lif` is still the final gate before tagging.
   - `LIF_Extractor.ijm` and `TrimTIF_Frames.ijm` are marked **superseded** but kept as
     proven fallbacks until the consolidated macro is smoke-tested in Fiji (ImageJ macros are
     not covered by CI). `docs/08` Step 1 and `fiji-macros/README.md` updated to point at it.
