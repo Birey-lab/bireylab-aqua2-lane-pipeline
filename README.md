@@ -4,7 +4,7 @@ Parallel detection + CFU clustering for calcium-imaging data using AQuA2, design
 
 The pipeline takes raw multi-frame TIFFs (calcium fluorescence movies), splits them into `N` parallel "lanes" (one MATLAB worker per lane), runs AQuA2 event detection and CFU clustering, and produces per-recording `.mat` outputs ready for downstream R analysis.
 
-**Current release: orchestrator [v0.8.5](https://github.com/Birey-lab/bireylab-aqua2-lane-pipeline/releases/tag/v0.8.5)** (July 2026). The orchestrator script `powershell/Run-Pipeline.ps1` drives the entire pipeline end-to-end (Split → Detect → CFU → Consolidate → Upload to S3) with per-run audit trails, three-stage stall detection, resume guards, and a detection-completeness gate. See [`CHANGELOG.md`](CHANGELOG.md) for the version history.
+**Current release: orchestrator [v0.9.0](https://github.com/Birey-lab/bireylab-aqua2-lane-pipeline/releases/tag/v0.9.0)** (July 2026). The orchestrator script `powershell/Run-Pipeline.ps1` drives the entire pipeline end-to-end (Split → Detect → CFU → Consolidate → Upload to S3) with per-run audit trails, three-stage stall detection, resume guards, and a detection-completeness gate. See [`CHANGELOG.md`](CHANGELOG.md) for the version history.
 
 **Key design decisions:**
 
@@ -54,7 +54,7 @@ For users without AMI access, or anyone building infrastructure for the first ti
 1. [`docs/01_OVERVIEW.md`](docs/01_OVERVIEW.md) — what the pipeline does, conceptually
 2. [`docs/02_INFRASTRUCTURE_SETUP.md`](docs/02_INFRASTRUCTURE_SETUP.md) — software stack, AWS, IAM, storage
 3. [`docs/03_SIZING_AND_RESIZING_GUIDE.md`](docs/03_SIZING_AND_RESIZING_GUIDE.md) — **measure your data before launching big compute** ← do not skip
-4. [`docs/04_PIPELINE_OPERATIONS.md`](docs/04_PIPELINE_OPERATIONS.md) — orchestrator usage, monitoring, recovery (v0.8.5)
+4. [`docs/04_PIPELINE_OPERATIONS.md`](docs/04_PIPELINE_OPERATIONS.md) — orchestrator usage, monitoring, recovery (v0.9.0)
 5. [`docs/05_DOWNSTREAM_R_ANALYSIS.md`](docs/05_DOWNSTREAM_R_ANALYSIS.md) — R script integration
 6. [`docs/06_PITFALLS_AND_RECOVERY.md`](docs/06_PITFALLS_AND_RECOVERY.md) — read at least once before any major run
 7. [`docs/07_TEARDOWN_CHECKLIST.md`](docs/07_TEARDOWN_CHECKLIST.md) — what to grab before deleting an instance
@@ -69,7 +69,7 @@ For users without AMI access, or anyone building infrastructure for the first ti
 
 | Path | What's in it |
 |---|---|
-| `powershell/Run-Pipeline.ps1` | **The orchestrator** — single script that drives the entire pipeline (v0.8.5+) |
+| `powershell/Run-Pipeline.ps1` | **The orchestrator** — single script that drives the entire pipeline (v0.9.0+) |
 | `powershell/` | Underlying lane-orchestration scripts (`Split-IntoLanes.ps1`, `Launch-Lanes-Exe.ps1`, `Build-CFU-Lanes.ps1`, `Launch-CFU-Lanes.ps1`, `Consolidate-Template.ps1`) — wrapped by the orchestrator; can be called directly for debugging |
 | `matlab/` | Real MATLAB source for the compiled workers (`aqua_lane.m`, `cfu_lane.m`) |
 | `fiji-macros/` | Fiji/ImageJ macros for TIFF preprocessing (`LIF_Extractor.ijm`, `TrimTIF_Frames.ijm`, `AQUA2_Movie_Timestamp.ijm`) |

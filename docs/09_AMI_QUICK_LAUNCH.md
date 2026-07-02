@@ -1,6 +1,6 @@
-# 09 — AMI Quick Launch (v0.8.5 fast path)
+# 09 — AMI Quick Launch (v0.9.0 fast path)
 
-This is the **recommended entry point** for new users with access to the pre-built lab AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, us-east-1). It bypasses the manual infrastructure setup ([`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md)) and most of the multi-script operations ceremony ([`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md) — retained for advanced/debugging use) by leveraging the `Run-Pipeline.ps1` orchestrator (v0.8.5+).
+This is the **recommended entry point** for new users with access to the pre-built lab AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, us-east-1). It bypasses the manual infrastructure setup ([`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md)) and most of the multi-script operations ceremony ([`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md) — retained for advanced/debugging use) by leveraging the `Run-Pipeline.ps1` orchestrator (v0.9.0+).
 
 If you don't have AMI access yet, or need to build a new AMI from scratch, fall back to docs 02 → 04 in order.
 
@@ -128,7 +128,7 @@ Open PowerShell on the EC2 instance (Start menu → PowerShell). Run these check
 cd C:\Users\Administrator\Documents\pipeline-repo
 git pull
 git describe --tags
-# Should show v0.8.5 or later
+# Should show v0.9.0 or later
 
 # Tool checks (all should return paths, not errors)
 where.exe matlab

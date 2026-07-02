@@ -1,9 +1,14 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.8.5 (2026-07-01).
+    Version 0.9.0 (2026-07-01).
 
 .DESCRIPTION
+    v0.9.0 changes: adds the consolidated Fiji input-prep tool
+    (fiji-macros/LIF_Extract_and_Trim.ijm: .lif -> raw + trimmed TIFFs with the
+    measured Hz appended to each filename). Run-Pipeline.ps1 itself is UNCHANGED
+    from v0.8.5. See CHANGELOG.md.
+
     v0.8.5 changes: docs-only release. AWS pricing figures reconciled to broad,
     consistent ranges (docs/03 is the cost reference; ~$0.06/vCPU-hr + AWS
     calculator link); intended git-pull update model documented in the README.
