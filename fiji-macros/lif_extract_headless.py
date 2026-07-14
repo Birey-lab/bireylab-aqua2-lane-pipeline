@@ -51,9 +51,8 @@ import re
 # stock CPython without a Fiji runtime. The Java classes are only referenced
 # inside the functions that actually decode/save, which never run under CPython.
 try:
-    from ij import IJ, ImagePlus
-    from ij.measure import Calibration
-    from ij.plugin import SubstackMaker
+    from ij import IJ
+    from ij.plugin import Duplicator
     from loci.plugins import BF
     # 'loci.plugins.in' can't be written as a normal `from ... import` because
     # `in` is a reserved word (a *syntax* error, uncatchable by try/except);
@@ -239,6 +238,43 @@ def save_tiff(imp, fi, path):
     IJ.saveAsTiff(imp, path)
 
 
+def duplicate_frames(imp, start, end):
+    # Extract frames [start,end] EXPLICITLY as a time (or, for a plain stack, a
+    # slice) range -- avoids the slices-vs-frames ambiguity of SubstackMaker on a
+    # hyperstack. Pixels are copied unchanged (bit-exact), matching the macro's
+    # Make Substack... frames=start-end.
+    nC = imp.getNChannels()
+    nZ = imp.getNSlices()
+    nT = imp.getNFrames()
+    dup = Duplicator()
+    if nT > 1:
+        return dup.run(imp, 1, nC, 1, nZ, start, end)   # time lives in T
+    else:
+        return dup.run(imp, 1, nC, start, end, 1, 1)     # plain stack: T in the Z/slice axis
+
+
+def ome_time_increment_seconds(meta, series_index):
+    # Fallback frame interval straight from OME metadata, used only if the ImageJ
+    # calibration didn't carry one. Very defensive: any API shape difference just
+    # yields <=0 (treated as "unknown"), never an exception.
+    try:
+        ti = meta.getPixelsTimeIncrement(series_index)
+        if ti is None:
+            return -1.0
+        try:
+            val = float(ti.value().doubleValue())        # newer OME: ome.units Time
+            unit = str(ti.unit().getSymbol()).lower()
+        except Exception:
+            val = float(ti); unit = 's'                  # older OME: plain Double (seconds)
+        if unit in ('ms', 'msec', 'millisecond', 'milliseconds'):
+            val = val / 1000.0
+        elif unit in ('min', 'minute', 'minutes'):
+            val = val * 60.0
+        return val
+    except Exception:
+        return -1.0
+
+
 def open_series(lif_path, series_index):
     # Bio-Formats API import of ONE series (headless-safe). Returns an ImagePlus.
     opts = ImporterOptions()
@@ -333,6 +369,8 @@ def process_lif(lif_path, dst_parent, cfg_state, log):
 
                 fi = frame_interval_seconds(imp)
                 if fi <= 0:
+                    fi = ome_time_increment_seconds(meta, s)   # fallback: OME metadata
+                if fi <= 0:
                     log("  [SKIP-NOFI] %s | %d frames | no frame interval -> cannot compute Hz"
                         % (series_name, total_frames))
                     T["nofi"] += 1
@@ -382,7 +420,7 @@ def process_lif(lif_path, dst_parent, cfg_state, log):
                             log("  [DRY-T]     %s.tif | frames %d-%d (%ss)"
                                 % (out_name, start, end, kept_sec))
                         else:
-                            sub = SubstackMaker().makeSubstack(imp, "%d-%d" % (start, end))
+                            sub = duplicate_frames(imp, start, end)
                             save_tiff(sub, fi, os.path.join(trimmed_dir, out_name + ".tif"))
                             sub.close()
                         if short:
@@ -480,7 +518,7 @@ def process_tiff(tif_path, out_root, cfg_state, log):
                 if dry:
                     log("  [DRY-T]     %s.tif | frames %d-%d" % (out_name, start, end))
                 else:
-                    sub = SubstackMaker().makeSubstack(imp, "%d-%d" % (start, end))
+                    sub = duplicate_frames(imp, start, end)
                     save_tiff(sub, fi, os.path.join(trimmed_dir, out_name + ".tif"))
                     sub.close()
                 tag = "  [OK]        "

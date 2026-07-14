@@ -321,7 +321,10 @@ param(
     [ValidateSet('warn','drop')][string]$RatePolicy = 'warn',
     [bool]$SkipTileScans = $true,
     [switch]$ExtractDryRun,
-    [string]$FijiExe = 'C:\Fiji.app\ImageJ-win64.exe',
+    # Current Fiji installs as C:\Fiji\fiji-windows-x64.exe; older ones use
+    # C:\Fiji.app\ImageJ-win64.exe. Pre-flight auto-discovers either if this
+    # default isn't present.
+    [string]$FijiExe = 'C:\Fiji\fiji-windows-x64.exe',
 
     [string]$ScriptsDir = $PSScriptRoot
 )
@@ -1061,18 +1064,25 @@ if ($doExtract) {
     # auto-discover an install in a non-default spot before giving up, so a Fiji
     # installed elsewhere still works without the caller knowing the exact path.
     if (-not (Test-Path -LiteralPath $FijiExe)) {
-        $fijiCandidates = @(
-            'C:\Fiji.app\ImageJ-win64.exe',
-            'C:\Program Files\Fiji.app\ImageJ-win64.exe',
-            (Join-Path $env:USERPROFILE 'Fiji.app\ImageJ-win64.exe'),
-            (Join-Path $env:USERPROFILE 'Desktop\Fiji.app\ImageJ-win64.exe'),
-            (Join-Path $env:USERPROFILE 'Downloads\Fiji.app\ImageJ-win64.exe'),
-            'D:\Fiji.app\ImageJ-win64.exe'
+        # Search common install roots for either the current (fiji-windows-x64.exe,
+        # under Fiji\) or legacy (ImageJ-win64.exe, under Fiji.app\) launcher.
+        $fijiRoots = @(
+            'C:\Fiji', 'C:\Fiji.app',
+            'C:\Program Files\Fiji', 'C:\Program Files\Fiji.app',
+            (Join-Path $env:USERPROFILE 'Fiji'),      (Join-Path $env:USERPROFILE 'Fiji.app'),
+            (Join-Path $env:USERPROFILE 'Desktop\Fiji'),   (Join-Path $env:USERPROFILE 'Desktop\Fiji.app'),
+            (Join-Path $env:USERPROFILE 'Downloads\Fiji'), (Join-Path $env:USERPROFILE 'Downloads\Fiji.app'),
+            'D:\Fiji', 'D:\Fiji.app'
         )
+        $fijiCandidates = foreach ($r in $fijiRoots) {
+            (Join-Path $r 'fiji-windows-x64.exe'); (Join-Path $r 'ImageJ-win64.exe')
+        }
         $found = $fijiCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
         if (-not $found) {
-            $cmd = Get-Command 'ImageJ-win64.exe' -ErrorAction SilentlyContinue
-            if ($cmd) { $found = $cmd.Source }
+            foreach ($exe in 'fiji-windows-x64.exe','ImageJ-win64.exe') {
+                $cmd = Get-Command $exe -ErrorAction SilentlyContinue
+                if ($cmd) { $found = $cmd.Source; break }
+            }
         }
         if ($found) {
             $FijiExe = $found
