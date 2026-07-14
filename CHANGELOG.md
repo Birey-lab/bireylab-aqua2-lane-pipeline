@@ -11,6 +11,59 @@ parameters).
 
 ---
 
+## Unreleased — targeting v0.10.0
+
+Optional **Phase 0 input prep** (start from LIF, or trim TIFFs) folded into the
+orchestrator, plus **MP4 movie generation** in Consolidate, a named-**preset**
+library with a **GUI launcher**, and a dependency **provisioner**. Merged to
+`main` (available via `git pull`); **not tagged yet** — holding the tag until a
+full instance run exercises Phase 0 extraction and the movie step end-to-end.
+
+- **Phase 0 — start from LIF files, or trim existing TIFFs (optional).**
+  `Run-Pipeline.ps1` can now run the LIF→TIFF extract/trim step itself (a headless
+  Bio-Formats port of `LIF_Extract_and_Trim.ijm`) before Split, or trim/Hz-label an
+  existing TIFF folder — then feed the result into Split→Detect→CFU→Consolidate.
+  Fully backward-compatible: with no `-LIFSource` and no `-TrimMode`, runs start from
+  TIFFs exactly as before. New params: `-LIFSource`, `-DetectOn`, `-SaveUntrimmed`,
+  `-TrimMode`/`-TrimStartSec`/`-TrimAmount`/`-TrimUnit`, `-HzLabel`/`-HzDecimals`,
+  `-RatePolicy`, `-SkipTileScans`, `-ExtractDryRun`, `-FijiExe`. Headless decode
+  validated on the instance (real 9-series LIF, correct measured Hz + trim). Engine:
+  `fiji-macros/lif_extract_headless.py` (config via `LIF_EXTRACT_CONFIG` env var).
+- **Movies — MP4 of each AQuA2 overlay, in Consolidate.** Each recording's
+  `<stem>_AQuA2_Movie.tif` (a multi-frame TIFF, **not** a GIF) becomes
+  `for_upload\Movies\<stem>_AQuA2_Movie.mp4`. ffmpeg can't read multi-page TIFF
+  (it decodes only the first page), so the path is **Fiji (stack → lossless PNG AVI) →
+  ffmpeg (AVI → H.264 MP4)**. Quality is high by default and tunable:
+  `-MovieCrf` (default **17**, visually transparent; lower = higher fidelity),
+  `-MovieLossless` (qp 0 + yuv444p, mathematically lossless — larger, needs VLC to
+  play), `-MovieAviCompression` (PNG|Uncompressed|JPEG, default PNG), `-MovieFps`
+  (default 20), `-SkipMovies`, `-FfmpegExe`. **Optional + non-fatal**: if Fiji or
+  ffmpeg is missing (or there are no movies), the step warns and skips; the run still
+  succeeds. Slow — reads ~900 MB TIFFs sequentially. Engine:
+  `fiji-macros/movies_to_avi.py`. Validated end-to-end on the instance (893 MB /
+  1200-frame movie → 3.8 MB crf-17 MP4, frame count preserved).
+- **Consolidate `input_TIFFs/` mirrors the original LIF tree.** When a run extracted
+  from LIF, `for_upload\input_TIFFs\` reproduces the source subfolder structure and
+  includes **both** the UNTRIMMED and TRIMMED sets (hardlinked). TIFF-start runs keep
+  the flat layout.
+- **Fixed: headless Fiji launch dropped `--run`.** `Start-Process` with a single
+  joined-string `ArgumentList` (`"--headless --run <path>"`) made the new Fiji
+  (Jaunch) launcher reject `--run` ("Ignoring invalid argument: --run") so the engine
+  never ran. Both launch sites (Phase 0 extract, Movies) now pass `ArgumentList` as an
+  **array** (`'--headless','--run',$engine`). See Pitfalls §17.
+- **Default `-OutputRoot`** is now `<Documents>\AQuA2_runs` (was mandatory), to keep
+  run data off the crowded `C:\` root.
+- **Preset library + GUI launcher.** Save a named detection-parameter set with
+  `Save-Preset.ps1 -Name <n>` → `cfg/presets/<n>.csv`, reuse with
+  `-ParamPreset <n>`. `New-Run.ps1` is a WinForms GUI: Browse buttons for folders, an
+  editable grid showing the **entire** `parameters_for_batch.csv`, trim controls, and
+  a "Save as preset" button. The parameters actually used are always written into each
+  run's output (`for_upload` → S3), so provenance travels with the data — committing a
+  preset is optional (only to share it across instances).
+- **Dependency provisioner.** `setup/Install-Dependencies.ps1` installs Fiji, ffmpeg,
+  R + Rtools45, RStudio, and the R packages (`setup/install_deps.R`). Idempotent, has
+  `-DryRun`. See [`02_INFRASTRUCTURE_SETUP.md`](docs/02_INFRASTRUCTURE_SETUP.md).
+
 ## v0.9.1 — 2026-07-14
 
 Orchestrator correctness fixes, all surfaced by the first full-scale real-data run
