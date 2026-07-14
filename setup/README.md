@@ -37,7 +37,12 @@ Fiji builds use `Fiji.app\ImageJ-win64.exe`; the script detects either.)
 | Fiji/ImageJ | `C:\Fiji` (bundled JDK) | downloads.imagej.net | download + unzip |
 | R | latest | CRAN / winget `RProject.R` | silent installer |
 | RStudio | latest | winget `Posit.RStudio` | silent installer (skipped if no winget) |
+| ffmpeg | `C:\ffmpeg` | winget `Gyan.FFmpeg` / gyan.dev | winget, else static build unzip |
 | R packages | — | CRAN + Bioconductor | `install.packages` / `BiocManager` (missing only) |
+
+ffmpeg is used by the pipeline's Consolidate step to turn PreCFU GIF overlays into
+MP4 movies. `-SkipFfmpeg` to opt out; the pipeline degrades gracefully (skips the
+Movies folder with a warning) if it's absent.
 
 R packages provisioned (from `library()`/`require()` in the analysis scripts):
 `dplyr tidyr readr stringr scales ggplot2 ggpubr ggrepel ggsignif patchwork

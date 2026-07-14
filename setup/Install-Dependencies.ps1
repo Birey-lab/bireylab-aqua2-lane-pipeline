@@ -46,10 +46,16 @@ param(
     [string]$FijiDir      = 'C:\Fiji',
     [string]$FijiExe      = '',   # point at an existing launcher to reuse it (skips download)
     [string]$FijiUrl      = 'https://downloads.imagej.net/fiji/latest/fiji-latest-win64-jdk.zip',
+    # ffmpeg is used by Run-Pipeline.ps1's Consolidate step to make MP4 movies
+    # from the PreCFU GIF overlays. Installed to C:\ffmpeg (pipeline auto-discovers
+    # C:\ffmpeg\bin\ffmpeg.exe) or via winget (added to PATH).
+    [string]$FfmpegDir    = 'C:\ffmpeg',
+    [string]$FfmpegUrl    = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip',
     [switch]$SkipFiji,
     [switch]$SkipR,
     [switch]$SkipRStudio,
     [switch]$SkipRPackages,
+    [switch]$SkipFfmpeg,
     [switch]$DryRun,
     [string]$LogDir       = 'C:\AQuA2\logs'
 )
@@ -133,6 +139,21 @@ function Get-FijiExeInDir {
     param([string]$Dir)
     foreach ($n in $FijiLaunchers) {
         $p = Join-Path $Dir $n
+        if (Test-Path $p) { return (Resolve-Path $p).Path }
+    }
+    return $null
+}
+
+function Find-Ffmpeg {
+    # Reuse an existing ffmpeg rather than reinstalling: PATH, then C:\ffmpeg\bin
+    # and other common spots.
+    $cmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($p in @(
+        (Join-Path $FfmpegDir 'bin\ffmpeg.exe'),
+        'C:\ffmpeg\bin\ffmpeg.exe',
+        "$env:ProgramFiles\ffmpeg\bin\ffmpeg.exe",
+        (Join-Path $env:USERPROFILE 'ffmpeg\bin\ffmpeg.exe'))) {
         if (Test-Path $p) { return (Resolve-Path $p).Path }
     }
     return $null
@@ -340,6 +361,57 @@ if (-not $SkipRStudio) {
     }
 } else {
     Log "skipped (-SkipRStudio)"; Record 'RStudio' 'skipped' ''
+}
+
+# ===================================================================
+# 3.5. ffmpeg (for Consolidate's PreCFU GIF -> MP4 movies)
+# ===================================================================
+Log ""
+Log "--- ffmpeg ---" 'Cyan'
+if (-not $SkipFfmpeg) {
+    $existingFfmpeg = Find-Ffmpeg
+    if ($existingFfmpeg) {
+        Ok "ffmpeg already present: $existingFfmpeg"
+        Record 'ffmpeg' 'present' $existingFfmpeg
+    } elseif ($DryRun) {
+        Warn "WOULD install ffmpeg (winget Gyan.FFmpeg, or static build -> $FfmpegDir)"
+        Record 'ffmpeg' 'would-install' $FfmpegDir
+    } else {
+        try {
+            if ($winget) {
+                Log "  installing ffmpeg via winget (Gyan.FFmpeg)..."
+                Invoke-Native 'winget' @('install','--id','Gyan.FFmpeg','--source','winget','--accept-package-agreements','--accept-source-agreements','--silent','--disable-interactivity') | Out-Null
+                $existingFfmpeg = Find-Ffmpeg
+            }
+            if (-not $existingFfmpeg) {
+                if ($winget) { Warn "  winget didn't produce a working ffmpeg; falling back to the static build." }
+                $zip = Join-Path $tmp 'ffmpeg.zip'
+                Download-File $FfmpegUrl $zip
+                $expandTo = Join-Path $env:SystemDrive '_ffmpeg_extract'
+                if (Test-Path $expandTo) { Remove-Item $expandTo -Recurse -Force -ErrorAction SilentlyContinue }
+                New-Item -ItemType Directory -Path $expandTo -Force | Out-Null
+                Log "  expanding ffmpeg archive..."
+                Expand-Archive -Path $zip -DestinationPath $expandTo -Force
+                $foundFf = Get-ChildItem $expandTo -Recurse -File -Filter 'ffmpeg.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $foundFf) { throw "ffmpeg.exe not found in the archive" }
+                # Move the build root (parent of \bin) to $FfmpegDir so the exe
+                # lands at $FfmpegDir\bin\ffmpeg.exe (what the pipeline looks for).
+                $buildRoot = Split-Path $foundFf.Directory.FullName -Parent
+                if (Test-Path $FfmpegDir) { Remove-Item $FfmpegDir -Recurse -Force -ErrorAction SilentlyContinue }
+                Move-Item -Path $buildRoot -Destination $FfmpegDir
+                Remove-Item $expandTo -Recurse -Force -ErrorAction SilentlyContinue
+                $existingFfmpeg = Join-Path $FfmpegDir 'bin\ffmpeg.exe'
+            }
+            if ($existingFfmpeg -and (Test-Path $existingFfmpeg)) {
+                Ok "ffmpeg installed: $existingFfmpeg"; Record 'ffmpeg' 'installed' $existingFfmpeg
+            } else { throw "post-install check failed: ffmpeg.exe not found" }
+        } catch {
+            Err "ffmpeg install failed: $($_.Exception.Message)"
+            Record 'ffmpeg' 'FAILED' $_.Exception.Message
+        }
+    }
+} else {
+    Log "skipped (-SkipFfmpeg)"; Record 'ffmpeg' 'skipped' ''
 }
 
 # ===================================================================
