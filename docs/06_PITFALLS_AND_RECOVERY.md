@@ -278,6 +278,26 @@ aws s3 sync "s3://<bucket>/CalciumImagingTIFFs/<dataset>/" "C:\Users\Administrat
 
 ---
 
+## 16. Input TIFFs in nested subfolders (Split moves 0, run dies)
+
+**Symptom:** the pre-flight reports the right input count, but Split creates lanes with no files and Detection then fails (or the completeness gate blocks the run). Your TIFFs are spread across subfolders (e.g. `ASOs\Inhibitory\...`, `ASOs\Excitatory\...`) rather than sitting directly in one folder.
+
+**Cause:** by default `Split-IntoLanes.ps1` reads the **top level only** of `-InputTIFFs`. Before v0.9.1 the orchestrator's pre-flight counted *recursively* while Split did not, so nested inputs showed N files at pre-flight but Split moved 0. (v0.9.1 makes the two consistent, so the mismatch now surfaces immediately instead of mid-run.)
+
+**Fix — pick one:**
+- **Recurse (v0.9.1+):** pass `-RecurseInput` to `Run-Pipeline.ps1` (or `-Recurse` to `Split-IntoLanes.ps1` directly). This pulls TIFFs from all nested subfolders. **Filenames must be unique across subfolders** — lane files are addressed by name alone, so the splitter **hard-errors and lists any duplicates** rather than silently dropping them. If you have collisions, give them unique names first (e.g. prefix by group).
+- **Flatten manually:** move/copy everything into one folder before launching, adding a group prefix to avoid name clashes:
+  ```powershell
+  Get-ChildItem C:\CalciumData\ASOs -Recurse -Filter *.tif | ForEach-Object {
+      $grp = ($_.Directory.FullName -split '\\')[-2]   # e.g. Inhibitory / Excitatory
+      Copy-Item $_.FullName (Join-Path C:\CalciumData\AllTIFFs ("{0}_{1}" -f $grp, $_.Name))
+  }
+  ```
+
+**Default is unchanged:** if your inputs are already flat in one folder, you don't need either flag.
+
+---
+
 ## General recovery principles
 
 When something goes wrong:

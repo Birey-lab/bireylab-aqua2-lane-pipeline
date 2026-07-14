@@ -76,7 +76,7 @@ If any check fails, see [`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.m
 
 ### A.4 — Confirm the input TIFFs are accessible
 
-Before launching the orchestrator, place your input TIFFs in a single directory. Most users either:
+Before launching the orchestrator, place your input TIFFs in a single directory (**top level** — Split reads only the top level by default). If your TIFFs are spread across nested subfolders, either flatten them into one folder or pass `-RecurseInput` (v0.9.1+; see the Split phase note below and Pitfalls §16). Most users either:
 
 - Pull from S3:
 
@@ -106,7 +106,7 @@ $totalGB = [math]::Round(((Get-ChildItem D:\incoming_tiffs -Filter *.tif | Measu
 | # | Phase | What it does | Output |
 |---|---|---|---|
 | 0 | **Auto-Size** (implicit) | Probes the largest input TIFF; computes safe lane count for the instance's RAM. Skipped if `-Lanes` is explicitly set. | (selects lane count) |
-| 1 | **Split** | Moves TIFFs from `-InputTIFFs` into `<projectRoot>\lanes\laneNN\` folders, size-balanced. | `<projectRoot>\lanes\laneNN\*.tif` |
+| 1 | **Split** | Moves TIFFs from `-InputTIFFs` into `<projectRoot>\lanes\laneNN\` folders, size-balanced. Top level only by default; add `-RecurseInput` (v0.9.1+) to pull nested subfolders — requires unique filenames, else it hard-errors. | `<projectRoot>\lanes\laneNN\*.tif` |
 | 2 | **Detect** | Launches N `aqua_lane.exe` workers in parallel, each processes its lane's TIFFs. | `<projectRoot>\PreCFU\laneNN_results\<stem>_AQuA2.mat` (+ siblings) |
 | 3 | **CFU** | Launches M `cfu_lane.exe` workers (~0.75 × N by default) over detected `.mat` files via NTFS junctions. Bakes CFU fields into the original `.mat` AND writes a standalone `_res_cfu.mat`. | `<projectRoot>\POST\<stem>_AQuA2_res_cfu.mat` |
 | 4 | **Consolidate** | Builds `<projectRoot>\for_upload\` with `input_TIFFs/`, `PreCFU/` (per-stem), `PostCFU/` (flat). Uses **NTFS hardlinks** — zero extra disk cost. | `<projectRoot>\for_upload\` |
