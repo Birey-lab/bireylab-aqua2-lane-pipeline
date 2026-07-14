@@ -41,9 +41,11 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$FijiDir      = 'C:\Fiji.app',
-    [string]$FijiExe      = '',   # point at an existing ImageJ-win64.exe to reuse it (skips download)
-    [string]$FijiUrl      = 'https://downloads.imagej.net/fiji/latest/fiji-win64.zip',
+    # Current Fiji unzips to a top-level "Fiji\" folder with launcher
+    # fiji-windows-x64.exe (older builds used "Fiji.app\ImageJ-win64.exe").
+    [string]$FijiDir      = 'C:\Fiji',
+    [string]$FijiExe      = '',   # point at an existing launcher to reuse it (skips download)
+    [string]$FijiUrl      = 'https://downloads.imagej.net/fiji/latest/fiji-latest-win64-jdk.zip',
     [switch]$SkipFiji,
     [switch]$SkipR,
     [switch]$SkipRStudio,
@@ -124,24 +126,42 @@ function Get-RscriptPath {
     return $null
 }
 
+# Known Fiji launcher executables, current first then legacy.
+$FijiLaunchers = @('fiji-windows-x64.exe', 'ImageJ-win64.exe')
+
+function Get-FijiExeInDir {
+    param([string]$Dir)
+    foreach ($n in $FijiLaunchers) {
+        $p = Join-Path $Dir $n
+        if (Test-Path $p) { return (Resolve-Path $p).Path }
+    }
+    return $null
+}
+
 function Find-Fiji {
     # Locate an existing Fiji so an install in a non-default spot is reused rather
-    # than duplicated. Order: explicit -FijiExe, the -FijiDir default, a handful of
-    # common locations, then the PATH.
+    # than duplicated. Handles BOTH the current (Fiji\fiji-windows-x64.exe) and
+    # legacy (Fiji.app\ImageJ-win64.exe) layouts. Order: explicit -FijiExe, the
+    # -FijiDir default, common roots, then the PATH.
     param([string]$Explicit)
-    $cands = New-Object System.Collections.ArrayList
-    if ($Explicit) { [void]$cands.Add($Explicit) }
-    [void]$cands.Add((Join-Path $FijiDir 'ImageJ-win64.exe'))
-    foreach ($p in @(
-        'C:\Fiji.app\ImageJ-win64.exe',
-        'C:\Program Files\Fiji.app\ImageJ-win64.exe',
-        (Join-Path $env:USERPROFILE 'Fiji.app\ImageJ-win64.exe'),
-        (Join-Path $env:USERPROFILE 'Desktop\Fiji.app\ImageJ-win64.exe'),
-        (Join-Path $env:USERPROFILE 'Downloads\Fiji.app\ImageJ-win64.exe'),
-        'D:\Fiji.app\ImageJ-win64.exe')) { [void]$cands.Add($p) }
-    foreach ($c in $cands) { if ($c -and (Test-Path $c)) { return (Resolve-Path $c).Path } }
-    $cmd = Get-Command 'ImageJ-win64.exe' -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
+    if ($Explicit -and (Test-Path $Explicit)) { return (Resolve-Path $Explicit).Path }
+    $roots = @(
+        $FijiDir,
+        'C:\Fiji', 'C:\Fiji.app',
+        'C:\Program Files\Fiji', 'C:\Program Files\Fiji.app',
+        (Join-Path $env:USERPROFILE 'Fiji'),           (Join-Path $env:USERPROFILE 'Fiji.app'),
+        (Join-Path $env:USERPROFILE 'Desktop\Fiji'),   (Join-Path $env:USERPROFILE 'Desktop\Fiji.app'),
+        (Join-Path $env:USERPROFILE 'Downloads\Fiji'), (Join-Path $env:USERPROFILE 'Downloads\Fiji.app'),
+        'D:\Fiji', 'D:\Fiji.app'
+    )
+    foreach ($r in ($roots | Select-Object -Unique)) {
+        $hit = Get-FijiExeInDir $r
+        if ($hit) { return $hit }
+    }
+    foreach ($n in $FijiLaunchers) {
+        $cmd = Get-Command $n -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+    }
     return $null
 }
 
@@ -178,14 +198,14 @@ if (-not $DryRun) { New-Item -ItemType Directory -Path $tmp -Force | Out-Null }
 # ===================================================================
 Log ""
 Log "--- Fiji / ImageJ ---" 'Cyan'
-$defaultFijiExe = Join-Path $FijiDir 'ImageJ-win64.exe'
-$existingFiji   = Find-Fiji $FijiExe
-$fijiExe        = if ($existingFiji) { $existingFiji } else { $defaultFijiExe }
+$existingFiji = Find-Fiji $FijiExe
+$fijiExe      = $existingFiji   # set to the installed path in the install branch
 if (-not $SkipFiji) {
     if ($existingFiji) {
         Ok "Fiji already present: $existingFiji"
-        if ($existingFiji -ne $defaultFijiExe) {
-            Warn "  (not at the default $defaultFijiExe -- pass this to the pipeline: -FijiExe `"$existingFiji`")"
+        $defaultExe = Get-FijiExeInDir $FijiDir
+        if ($existingFiji -ne $defaultExe) {
+            Warn "  (not at the default $FijiDir -- pass this to the pipeline: -FijiExe `"$existingFiji`")"
         }
         Record 'Fiji' 'present' $existingFiji
     } elseif ($DryRun) {
@@ -193,24 +213,24 @@ if (-not $SkipFiji) {
         Record 'Fiji' 'would-install' $FijiDir
     } else {
         try {
-            $zip = Join-Path $tmp 'fiji-win64.zip'
+            $zip = Join-Path $tmp 'fiji.zip'
             Download-File $FijiUrl $zip
-            # The zip contains a top-level Fiji.app\ folder.
+            # Current archive contains a top-level "Fiji\" folder (older builds:
+            # "Fiji.app\"). Locate the launcher inside the extract, then move its
+            # containing folder to $FijiDir -- robust to either layout/name.
             $expandTo = Join-Path $tmp 'fiji_extract'
-            Log "  expanding archive..."
+            Log "  expanding archive (this is a few hundred MB)..."
             Expand-Archive -Path $zip -DestinationPath $expandTo -Force
-            $srcApp = Join-Path $expandTo 'Fiji.app'
-            if (-not (Test-Path $srcApp)) {
-                # Some builds unzip without the Fiji.app wrapper; locate the exe.
-                $foundExe = Get-ChildItem $expandTo -Recurse -Filter 'ImageJ-win64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($foundExe) { $srcApp = $foundExe.Directory.FullName } else { throw "ImageJ-win64.exe not found in the Fiji archive" }
-            }
+            $foundExe = Get-ChildItem $expandTo -Recurse -File -Include $FijiLaunchers -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $foundExe) { throw "no Fiji launcher ($($FijiLaunchers -join '/')) found in the archive" }
+            $srcApp = $foundExe.Directory.FullName
             $parent = Split-Path $FijiDir -Parent
             if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-            if (Test-Path $FijiDir) { throw "$FijiDir exists but has no ImageJ-win64.exe; move it aside and re-run" }
+            if (Test-Path $FijiDir) { throw "$FijiDir already exists but has no Fiji launcher; move it aside and re-run" }
             Move-Item -Path $srcApp -Destination $FijiDir
-            if (Test-Path $fijiExe) { Ok "Fiji installed: $fijiExe"; Record 'Fiji' 'installed' $fijiExe }
-            else { throw "post-install check failed: $fijiExe missing" }
+            $fijiExe = Get-FijiExeInDir $FijiDir
+            if ($fijiExe) { Ok "Fiji installed: $fijiExe"; Record 'Fiji' 'installed' $fijiExe }
+            else { throw "post-install check failed: no launcher under $FijiDir" }
         } catch {
             Err "Fiji install failed: $($_.Exception.Message)"
             Record 'Fiji' 'FAILED' $_.Exception.Message
@@ -237,7 +257,7 @@ if (-not $SkipR) {
         try {
             if ($winget) {
                 Log "  installing R via winget (RProject.R)..."
-                & winget install --id RProject.R --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | ForEach-Object { Log "    $_" }
+                & winget install --id RProject.R --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity 2>&1 | ForEach-Object { Log "    $_" }
             } else {
                 # Direct CRAN installer (Inno Setup -> silent flags).
                 $page = Invoke-WebRequest 'https://cran.r-project.org/bin/windows/base/' -UseBasicParsing
@@ -281,7 +301,7 @@ if (-not $SkipRStudio) {
     } elseif ($winget) {
         try {
             Log "  installing RStudio via winget (Posit.RStudio)..."
-            & winget install --id Posit.RStudio --source winget --accept-package-agreements --accept-source-agreements --silent 2>&1 | ForEach-Object { Log "    $_" }
+            & winget install --id Posit.RStudio --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity 2>&1 | ForEach-Object { Log "    $_" }
             if (Test-RStudio) { Ok "RStudio installed"; Record 'RStudio' 'installed' '' }
             else { Warn "RStudio install ran but the exe wasn't found where expected; verify manually."; Record 'RStudio' 'unverified' '' }
         } catch {
@@ -377,7 +397,7 @@ if ($DryRun) {
     Log "DRY RUN complete -- nothing was installed. Re-run without -DryRun to provision." 'Yellow'
 } elseif ($failed.Count -eq 0) {
     Ok "All requested components are present."
-    if (Test-Path $fijiExe) { Log ("Phase 0 can use: -FijiExe `"{0}`"" -f $fijiExe) }
+    if ($fijiExe -and (Test-Path $fijiExe)) { Log ("Phase 0 can use: -FijiExe `"{0}`"" -f $fijiExe) }
 } else {
     Err ("{0} component(s) need attention -- see the log: {1}" -f $failed.Count, $logPath)
 }

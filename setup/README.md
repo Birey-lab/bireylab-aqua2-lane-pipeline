@@ -23,17 +23,18 @@ powershell -ExecutionPolicy Bypass -File .\setup\Install-Dependencies.ps1
 # Variations:
 #   -SkipRStudio      R only (enough to RUN the analysis; no IDE)
 #   -SkipFiji         if Fiji is already installed elsewhere
-#   -FijiDir D:\Fiji.app   install Fiji somewhere other than C:\Fiji.app
+#   -FijiDir D:\Fiji      install Fiji somewhere other than C:\Fiji
 ```
 
-After it finishes, `C:\Fiji.app\ImageJ-win64.exe` is the default `-FijiExe` for
-`Run-Pipeline.ps1`'s Phase 0 LIF extraction, so no extra flag is needed.
+After it finishes, `C:\Fiji\fiji-windows-x64.exe` is the default `-FijiExe` for
+`Run-Pipeline.ps1`'s Phase 0 LIF extraction, so no extra flag is needed. (Older
+Fiji builds use `Fiji.app\ImageJ-win64.exe`; the script detects either.)
 
 ### What gets installed
 
 | Component | Default | Source | How |
 |---|---|---|---|
-| Fiji/ImageJ | `C:\Fiji.app` | downloads.imagej.net | download + unzip |
+| Fiji/ImageJ | `C:\Fiji` (bundled JDK) | downloads.imagej.net | download + unzip |
 | R | latest | CRAN / winget `RProject.R` | silent installer |
 | RStudio | latest | winget `Posit.RStudio` | silent installer (skipped if no winget) |
 | R packages | — | CRAN + Bioconductor | `install.packages` / `BiocManager` (missing only) |
