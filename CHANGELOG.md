@@ -11,6 +11,42 @@ parameters).
 
 ---
 
+## v0.9.1 — 2026-07-14
+
+Orchestrator correctness fixes, all surfaced by the first full-scale real-data run
+(292 ASO TIFFs, 10 detection lanes / 7 CFU lanes on r7a.8xlarge). The run completed
+cleanly (292/292 detection + CFU, 0 failures) — these fixes remove false alarms and
+restore the auto-skip safety net; none were data-loss bugs in that run.
+
+- **Per-lane stall detection no longer false-fires.**
+  - *Detection:* the per-lane completion counter ([Run-Pipeline.ps1](powershell/Run-Pipeline.ps1))
+    and `Find-StuckFile` enumerated lane TIFFs with `Get-ChildItem -Include *.tif,*.tiff`
+    but **no `-Recurse`** — PowerShell's `-Include` matches nothing without `-Recurse`
+    (or a `\*` path), so the per-lane count was pinned at 0 for every lane. The stall
+    clock therefore never advanced and fired `[STALL WARN]` → `[ESCALATED]` →
+    `[AUTO-SKIP]` on all lanes even while the run progressed normally; `Find-StuckFile`
+    returned `$null`, making auto-skip a silent no-op (the safety net was non-functional).
+    Added `-Recurse` at both sites (matching the completeness gate's proven idiom).
+  - *CFU:* the CFU per-lane counter had a **different** root cause — it *did* use
+    `-Recurse`, but CFU lanes are directory **junctions** (see `Build-CFU-Lanes.ps1`) and
+    `-Recurse` does not reliably descend through junction reparse points (behavior varies
+    by PowerShell version), so its count was also pinned at 0. Now it lists each junction
+    as a top-level child dir and reads the `_AQuA2.mat` through **direct access**, which
+    resolves the junction reliably. This matters more on the CFU side because the CFU
+    auto-skip is destructive (kills the worker, no auto-restart) — with the counter fixed,
+    it can only fire on a genuine hang.
+- **Splitter can now recurse into nested input subfolders.** `Split-IntoLanes.ps1` gains
+  an opt-in `-Recurse` with a **hard duplicate-filename collision guard** (lane files are
+  addressed by filename alone, so same-named files in different subfolders would collide —
+  the script now errors and lists them instead of silently dropping). `Run-Pipeline.ps1`
+  gains `-RecurseInput`, which drives **both** the splitter and the pre-flight input count
+  so they always agree. Previously the pre-flight always recursed while Split took top-level
+  only, so nested inputs reported N files but Split moved 0 and Detection then died mid-run.
+- **Cosmetic:** the post-CFU "Junctions ready: N lane folders" tally filtered with `^lane`,
+  which never matches `cfu_laneNN`, so it always printed 0. Fixed to `^cfu_lane`.
+
+---
+
 ## v0.9.0 — 2026-07-01
 
 New Fiji input-prep tooling. (The orchestrator `Run-Pipeline.ps1` is unchanged since v0.8.5.)

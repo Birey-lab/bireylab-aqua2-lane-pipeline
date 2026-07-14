@@ -4,7 +4,7 @@ Parallel detection + CFU clustering for calcium-imaging data using AQuA2, design
 
 The pipeline takes raw multi-frame TIFFs (calcium fluorescence movies), splits them into `N` parallel "lanes" (one MATLAB worker per lane), runs AQuA2 event detection and CFU clustering, and produces per-recording `.mat` outputs ready for downstream R analysis.
 
-**Current release: orchestrator [v0.9.0](https://github.com/Birey-lab/bireylab-aqua2-lane-pipeline/releases/tag/v0.9.0)** (July 2026). The orchestrator script `powershell/Run-Pipeline.ps1` drives the entire pipeline end-to-end (Split → Detect → CFU → Consolidate → Upload to S3) with per-run audit trails, three-stage stall detection, resume guards, and a detection-completeness gate. See [`CHANGELOG.md`](CHANGELOG.md) for the version history.
+**Current release: orchestrator [v0.9.1](https://github.com/Birey-lab/bireylab-aqua2-lane-pipeline/releases/tag/v0.9.1)** (July 2026). The orchestrator script `powershell/Run-Pipeline.ps1` drives the entire pipeline end-to-end (Split → Detect → CFU → Consolidate → Upload to S3) with per-run audit trails, three-stage stall detection, resume guards, and a detection-completeness gate. v0.9.1 fixes false-positive stall alarms and adds opt-in recursive input splitting (see below). See [`CHANGELOG.md`](CHANGELOG.md) for the version history.
 
 **Key design decisions:**
 
@@ -69,7 +69,7 @@ For users without AMI access, or anyone building infrastructure for the first ti
 
 | Path | What's in it |
 |---|---|
-| `powershell/Run-Pipeline.ps1` | **The orchestrator** — single script that drives the entire pipeline (v0.9.0+) |
+| `powershell/Run-Pipeline.ps1` | **The orchestrator** — single script that drives the entire pipeline (v0.9.1+) |
 | `powershell/` | Underlying lane-orchestration scripts (`Split-IntoLanes.ps1`, `Launch-Lanes-Exe.ps1`, `Build-CFU-Lanes.ps1`, `Launch-CFU-Lanes.ps1`, `Consolidate-Template.ps1`) — wrapped by the orchestrator; can be called directly for debugging |
 | `matlab/` | Real MATLAB source for the compiled workers (`aqua_lane.m`, `cfu_lane.m`) |
 | `fiji-macros/` | Fiji/ImageJ macros for TIFF preprocessing (`LIF_Extractor.ijm`, `TrimTIF_Frames.ijm`, `AQUA2_Movie_Timestamp.ijm`) |
