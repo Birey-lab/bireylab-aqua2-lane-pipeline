@@ -1417,17 +1417,22 @@ if ($doExtract) {
     Note "Launching headless Fiji (large LIFs can take a while)..."
 
     $env:LIF_EXTRACT_CONFIG = $cfgPath
-    # Fiji writes to stderr even on success; with $ErrorActionPreference='Stop'
-    # a merged (2>&1) native stderr line raises a terminating NativeCommandError.
-    # Drop to 'Continue' around the call so success is judged from the engine log,
-    # not from stderr chatter. (The exit code is unreliable anyway.)
-    $prevEAP = $ErrorActionPreference
+    $fijiOut = Join-Path $runAuditDir 'fiji_stdout.log'
+    $fijiErr = Join-Path $runAuditDir 'fiji_stderr.log'
+    # fiji-windows-x64.exe is a GUI-SUBSYSTEM app: launching it with '&' returns
+    # IMMEDIATELY without waiting, so a following log check would race ahead of the
+    # engine (observed on the instance: "GUI program launched from PowerShell").
+    # Use Start-Process -Wait so we block until Fiji exits, and redirect its
+    # stdout/stderr to files (also sidesteps the native-stderr/EAP=Stop issue --
+    # no pipeline involved). NOTE: the current launcher REJECTS --console
+    # ("Ignoring invalid argument"), so it is intentionally omitted.
     try {
-        $ErrorActionPreference = 'Continue'
-        & $FijiExe --headless --console --run $engineScript 2>&1 |
-            Tee-Object -FilePath (Join-Path $runAuditDir 'fiji_stdout.log') | Out-Null
+        $proc = Start-Process -FilePath $FijiExe `
+            -ArgumentList "--headless --run `"$engineScript`"" `
+            -Wait -NoNewWindow -PassThru `
+            -RedirectStandardOutput $fijiOut -RedirectStandardError $fijiErr
+        if ($proc) { Note ("Fiji exited with code {0}" -f $proc.ExitCode) }
     } finally {
-        $ErrorActionPreference = $prevEAP
         Remove-Item Env:\LIF_EXTRACT_CONFIG -ErrorAction SilentlyContinue
     }
 
@@ -1442,8 +1447,10 @@ if ($doExtract) {
     if (-not $engineOk) {
         Err2 "LIF extraction did not complete cleanly. Inspect:"
         Err2 ("  engine log:  {0}" -f $extractLog)
-        Err2 ("  fiji stdout: {0}" -f (Join-Path $runAuditDir 'fiji_stdout.log'))
-        if (Test-Path $extractLog) { Get-Content $extractLog -Tail 15 | ForEach-Object { Warn2 "  | $_" } }
+        Err2 ("  fiji stdout: {0}" -f $fijiOut)
+        Err2 ("  fiji stderr: {0}" -f $fijiErr)
+        if (Test-Path $extractLog)  { Get-Content $extractLog -Tail 15 | ForEach-Object { Warn2 "  | $_" } }
+        elseif (Test-Path $fijiErr) { Get-Content $fijiErr   -Tail 15 | ForEach-Object { Warn2 "  | $_" } }
         Stop-Transcript | Out-Null
         Write-Error "Phase 0 (LIF extraction) failed."
         return
