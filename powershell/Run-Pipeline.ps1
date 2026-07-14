@@ -143,9 +143,11 @@
     - Default CFU is now ON (Split + Detect + CFU run together).
     - NEW Consolidate phase creates a flat layout at
       <projectRoot>/for_upload/ with:
-        - input_TIFFs/   (flat; hardlinks to all source TIFFs)
+        - input_TIFFs/   (LIF runs: mirrors the original LIF tree, both UNTRIMMED
+                          + TRIMMED; TIFF-start runs: flat hardlinks)
         - PreCFU/        (per-stem subfolders with _AQuA2.mat)
         - PostCFU/       (flat; one _res_cfu.mat per stem)
+        - Movies/        (one .mp4 per PreCFU GIF overlay; needs ffmpeg)
       Upload phase syncs for_upload/ to S3.
     - Per-run audit subfolder _logs/run_<timestamp>[_<RunName>]/ contains
       all audit artifacts for this run.
@@ -260,7 +262,9 @@
 [CmdletBinding()]
 param(
     [string]$InputTIFFs,
-    [Parameter(Mandatory=$true)] [string]$OutputRoot,
+    # Default output root under the user's Documents (keeps run data off the
+    # crowded C:\ root). Override with -OutputRoot. Created if it doesn't exist.
+    [string]$OutputRoot = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'AQuA2_runs'),
     [Parameter(Mandatory=$true)] [string]$ProjectName,
 
     # --- Phase toggles (default ON ON ON OFF OFF) ---
@@ -325,6 +329,13 @@ param(
     # C:\Fiji.app\ImageJ-win64.exe. Pre-flight auto-discovers either if this
     # default isn't present.
     [string]$FijiExe = 'C:\Fiji\fiji-windows-x64.exe',
+
+    # --- Consolidate: MP4 movies from the PreCFU GIF overlays ---
+    # Consolidate converts each PreCFU *.gif to an .mp4 under for_upload\Movies\.
+    # Needs ffmpeg (installed by setup\Install-Dependencies.ps1). If ffmpeg is
+    # missing at run time the movie step is skipped with a warning, never fatal.
+    [switch]$SkipMovies,
+    [string]$FfmpegExe = 'ffmpeg',
 
     [string]$ScriptsDir = $PSScriptRoot
 )
@@ -2207,36 +2218,56 @@ elseif ($Consolidate) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
 
-    # ---- input TIFFs: hardlink from all lane folders into flat dir ----
-    Note "Consolidating input TIFFs (hardlink to avoid disk doubling)..."
-    $allTiffs = @()
-    if (Test-Path $paths['lanes']) {
-        $allTiffs += @(Get-ChildItem $paths['lanes'] -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Name -notlike '._*' -and $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
-    }
-    Note ("  Found {0} TIFFs in lane folders (excluding _stalled)" -f $allTiffs.Count)
-    $tiffLinked = 0
-    $tiffCopied = 0
-    $tiffSkipped = 0
-    foreach ($t in $allTiffs) {
-        $dest = Join-Path $upTIFFs $t.Name
-        if (Test-Path $dest) {
-            $tiffSkipped++
-            continue
-        }
-        try {
-            New-Item -ItemType HardLink -Path $dest -Value $t.FullName -ErrorAction Stop | Out-Null
-            $tiffLinked++
-        } catch {
+    # ---- input TIFFs ----
+    # If this project came from LIF extraction (a <projectRoot>\extracted\ tree
+    # exists), MIRROR that whole tree -- both UNTRIMMED and TRIMMED, under each
+    # LIF's original subpath -- so input_TIFFs preserves the original LIF
+    # structure. Otherwise (TIFF-start), fall back to a flat hardlink from lanes.
+    $extractedDir = Join-Path $projectRoot 'extracted'
+    $tiffLinked = 0; $tiffCopied = 0; $tiffSkipped = 0; $tiffFailed = 0
+    if (Test-Path $extractedDir) {
+        Note "Consolidating input TIFFs (mirroring LIF structure from extracted\; hardlinked)..."
+        $srcTiffs = @(Get-ChildItem $extractedDir -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Name -notlike '._*' })
+        $extractedPrefix = (Resolve-Path -LiteralPath $extractedDir).Path.TrimEnd('\') + '\'
+        Note ("  Found {0} TIFFs under extracted\ (both UNTRIMMED + TRIMMED)" -f $srcTiffs.Count)
+        foreach ($t in $srcTiffs) {
+            $rel  = $t.FullName.Substring($extractedPrefix.Length)   # e.g. Inhibitory\LIF1\TRIMMED\s3_20Hz.tif
+            $dest = Join-Path $upTIFFs $rel
+            if (Test-Path $dest) { $tiffSkipped++; continue }
+            $destParent = Split-Path $dest -Parent
+            if (-not (Test-Path $destParent)) { New-Item -ItemType Directory -Path $destParent -Force | Out-Null }
             try {
-                Copy-Item $t.FullName $dest -Force
-                $tiffCopied++
+                New-Item -ItemType HardLink -Path $dest -Value $t.FullName -ErrorAction Stop | Out-Null
+                $tiffLinked++
             } catch {
-                Warn2 ("Failed to consolidate {0}: {1}" -f $t.Name, $_.Exception.Message)
+                try { Copy-Item $t.FullName $dest -Force; $tiffCopied++ }
+                catch { $tiffFailed++; Warn2 ("Failed to consolidate {0}: {1}" -f $rel, $_.Exception.Message) }
             }
         }
+        $subdirCount = @(Get-ChildItem $upTIFFs -Directory -ErrorAction SilentlyContinue).Count
+        Note ("  input_TIFFs mirrored: hardlinked={0}, copied={1}, already present={2}, failed={3} ({4} top-level group(s))" -f $tiffLinked, $tiffCopied, $tiffSkipped, $tiffFailed, $subdirCount)
+    } else {
+        Note "Consolidating input TIFFs (flat hardlink from lanes; no LIF structure to preserve)..."
+        $allTiffs = @()
+        if (Test-Path $paths['lanes']) {
+            $allTiffs += @(Get-ChildItem $paths['lanes'] -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+                           Where-Object { $_.Name -notlike '._*' -and $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
+        }
+        Note ("  Found {0} TIFFs in lane folders (excluding _stalled)" -f $allTiffs.Count)
+        foreach ($t in $allTiffs) {
+            $dest = Join-Path $upTIFFs $t.Name
+            if (Test-Path $dest) { $tiffSkipped++; continue }
+            try {
+                New-Item -ItemType HardLink -Path $dest -Value $t.FullName -ErrorAction Stop | Out-Null
+                $tiffLinked++
+            } catch {
+                try { Copy-Item $t.FullName $dest -Force; $tiffCopied++ }
+                catch { $tiffFailed++; Warn2 ("Failed to consolidate {0}: {1}" -f $t.Name, $_.Exception.Message) }
+            }
+        }
+        Note ("  Hardlinked: {0}, copied: {1}, already present: {2}, failed: {3}" -f $tiffLinked, $tiffCopied, $tiffSkipped, $tiffFailed)
     }
-    Note ("  Hardlinked: {0}, copied: {1}, already present: {2}" -f $tiffLinked, $tiffCopied, $tiffSkipped)
 
     # ---- PreCFU: per-stem subfolders, hardlinked. Each stem gets ALL its accessory files. ----
     # AQuA2 produces per-recording bundles:
@@ -2333,9 +2364,71 @@ elseif ($Consolidate) {
     }
     Note ("  PostCFU: hardlinked={0}, copied={1}, already present={2}" -f $postLinked, $postCopied, $postSkipped)
 
-    $finalTiffs   = (Get-ChildItem $upTIFFs  -File).Count
+    # ---- Movies: MP4 of each PreCFU GIF overlay (via ffmpeg) ----
+    # AQuA2 writes an animated .gif overlay per recording under PreCFU. Convert
+    # each to a widely-playable .mp4 into for_upload\Movies\. Optional + non-fatal:
+    # if ffmpeg is missing the step is skipped with a warning (run still succeeds).
+    $mp4Ok = 0; $mp4Fail = 0; $mp4Skip = 0; $movieGifCount = 0; $ffmpegResolved = $null
+    if (-not $SkipMovies) {
+        $upMovies = Join-Path $uploadDir 'Movies'
+        $srcGifs = @(Get-ChildItem $paths['PreCFU'] -Recurse -File -Filter *.gif -ErrorAction SilentlyContinue |
+                     Where-Object { $_.DirectoryName -notmatch '\\_failures(\\|$)' })
+        $movieGifCount = $srcGifs.Count
+        if ($movieGifCount -eq 0) {
+            Note "Movies: no .gif overlays found under PreCFU; nothing to convert."
+        } else {
+            # Resolve ffmpeg: -FfmpegExe (default 'ffmpeg' on PATH), else common spots.
+            $ffmpegResolved = $null
+            $ffCmd = Get-Command $FfmpegExe -ErrorAction SilentlyContinue
+            if ($ffCmd) { $ffmpegResolved = $ffCmd.Source }
+            else {
+                foreach ($cand in @(
+                    'C:\ffmpeg\bin\ffmpeg.exe',
+                    "$env:ProgramFiles\ffmpeg\bin\ffmpeg.exe",
+                    (Join-Path $env:USERPROFILE 'ffmpeg\bin\ffmpeg.exe'))) {
+                    if (Test-Path $cand) { $ffmpegResolved = $cand; break }
+                }
+            }
+            if (-not $ffmpegResolved) {
+                Warn2 ("Movies: ffmpeg not found ({0} GIF(s) not converted). Install it via setup\Install-Dependencies.ps1 or pass -FfmpegExe, then re-run -Consolidate. Skipping (non-fatal)." -f $movieGifCount)
+            } else {
+                if (-not (Test-Path $upMovies)) { New-Item -ItemType Directory -Path $upMovies -Force | Out-Null }
+                $ffVer = (& $ffmpegResolved -version 2>$null | Select-Object -First 1)
+                Note ("Movies: converting {0} PreCFU GIF(s) -> MP4 with {1}" -f $movieGifCount, $ffmpegResolved)
+                if ($ffVer) { Note ("  ffmpeg: {0}" -f $ffVer) }
+                $movieErrLog = Join-Path $runAuditDir 'movies_ffmpeg_errors.log'
+                $gi = 0
+                foreach ($gif in $srcGifs) {
+                    $gi++
+                    if ($gi % 50 -eq 0) { Note ("  ... {0}/{1} movies converted" -f $gi, $movieGifCount) }
+                    $mp4 = Join-Path $upMovies (($gif.BaseName) + '.mp4')
+                    if (Test-Path $mp4) { $mp4Skip++; continue }
+                    # yuv420p needs even dimensions; scale filter guards odd sizes.
+                    # stderr -> file (NOT 2>&1) so ffmpeg's chatter can't trip EAP=Stop.
+                    & $ffmpegResolved -y -loglevel error -i $gif.FullName `
+                        -movflags +faststart -pix_fmt yuv420p `
+                        -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" $mp4 2> $movieErrLog
+                    if ($LASTEXITCODE -eq 0 -and (Test-Path $mp4) -and (Get-Item $mp4).Length -gt 0) {
+                        $mp4Ok++
+                    } else {
+                        $mp4Fail++
+                        $errTail = if (Test-Path $movieErrLog) { (Get-Content $movieErrLog -Tail 1) } else { '' }
+                        Warn2 ("  Movie FAILED: {0} (exit {1}) {2}" -f $gif.Name, $LASTEXITCODE, $errTail)
+                        if (Test-Path $mp4) { Remove-Item $mp4 -Force -ErrorAction SilentlyContinue }  # drop empty/partial
+                    }
+                }
+                Note ("  Movies: {0} converted, {1} failed, {2} already present -> {3}" -f $mp4Ok, $mp4Fail, $mp4Skip, $upMovies)
+                if ($mp4Fail -gt 0) { Warn2 ("  {0} movie(s) failed; see {1}" -f $mp4Fail, $movieErrLog) }
+            }
+        }
+    } else {
+        Note "Movies: skipped (-SkipMovies)."
+    }
+
+    $finalTiffs   = (Get-ChildItem $upTIFFs  -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue).Count
     $finalPreCFU  = (Get-ChildItem $upPreCFU -Recurse -Filter "*_AQuA2.mat" -File).Count
     $finalPostCFU = (Get-ChildItem $upPost   -File -Filter "*_res_cfu.mat").Count
+    $finalMovies  = if (Test-Path (Join-Path $uploadDir 'Movies')) { (Get-ChildItem (Join-Path $uploadDir 'Movies') -File -Filter *.mp4 -ErrorAction SilentlyContinue).Count } else { 0 }
 
     # v0.8: drop the exact parameters CSV used into the upload folder, named with the project,
     # so provenance travels with the data. Copy (not hardlink) so it survives cleanup.
@@ -2351,7 +2444,7 @@ elseif ($Consolidate) {
     $runSummary = Join-Path $runAuditDir 'RUN_SUMMARY.md'
     if (Test-Path $runSummary) { Copy-Item $runSummary (Join-Path $uploadDir 'RUN_SUMMARY.md') -Force }
 
-    PhaseEnd 4 "Consolidate" $start ("for_upload/: {0} TIFFs, {1} PreCFU .mat, {2} PostCFU .mat" -f $finalTiffs, $finalPreCFU, $finalPostCFU)
+    PhaseEnd 4 "Consolidate" $start ("for_upload/: {0} TIFFs, {1} PreCFU .mat, {2} PostCFU .mat, {3} movies" -f $finalTiffs, $finalPreCFU, $finalPostCFU, $finalMovies)
 
     # ------------------------------------------------------------------
     # v0.8 OPTIONAL CLEANUP (-Cleanup, default OFF; destructive, gated)
@@ -2411,7 +2504,7 @@ elseif ($Consolidate) {
                 try {
                     Move-Item $uploadDir $finalDir -Force
                     Note ("  Final deliverable: {0}" -f $finalDir)
-                    Note "  Contains: input_TIFFs/, PreCFU/, PostCFU/, parameters CSV, RUN_SUMMARY.md"
+                    Note "  Contains: input_TIFFs/ (LIF structure), PreCFU/, PostCFU/, Movies/, parameters CSV, RUN_SUMMARY.md"
                 } catch {
                     Warn2 ("  Could not rename for_upload/ -> {0}: {1}" -f $finalDir, $_.Exception.Message)
                 }
@@ -2429,6 +2522,7 @@ Upload-ready directory:  $uploadDir
 input_TIFFs/ count:      $finalTiffs (hardlinked=$tiffLinked, copied=$tiffCopied)
 PreCFU/ .mat count:      $finalPreCFU (hardlinked=$preLinked, copied=$preCopied)
 PostCFU/ .mat count:     $finalPostCFU (hardlinked=$postLinked, copied=$postCopied)
+Movies/ .mp4 count:      $finalMovies (converted=$mp4Ok, failed=$mp4Fail, from $movieGifCount GIF(s))
 Run audit dir:           $runAuditDir
 "@
     $consolidateMarker | Out-File $markerConsolidate -Encoding UTF8
@@ -2628,9 +2722,16 @@ if ($CFU -and -not $Upload -and -not $Consolidate) {
 if ($Consolidate -and -not $Upload) {
     Write-Host "  Consolidated outputs ready at:" -ForegroundColor Green
     Write-Host ("    {0}" -f $paths['for_upload'])
-    Write-Host "      input_TIFFs/   (flat: all source TIFFs)"
+    if (Test-Path (Join-Path $projectRoot 'extracted')) {
+        Write-Host "      input_TIFFs/   (mirrors the original LIF tree; UNTRIMMED + TRIMMED)"
+    } else {
+        Write-Host "      input_TIFFs/   (flat: all source TIFFs)"
+    }
     Write-Host "      PreCFU/        (per-stem subfolders with _AQuA2.mat)"
     Write-Host "      PostCFU/       (flat: one _res_cfu.mat per stem)"
+    if (Test-Path (Join-Path $paths['for_upload'] 'Movies')) {
+        Write-Host "      Movies/        (one .mp4 per PreCFU GIF overlay)"
+    }
     Write-Host ""
     Write-Host "  To upload to S3:"
     Write-Host ("       .\Run-Pipeline.ps1 -OutputRoot {0} -ProjectName {1} -Split `$false -Detect `$false -CFU `$false -Consolidate `$false -Upload `$true -S3Prefix s3://..." -f $OutputRoot, $ProjectName)
