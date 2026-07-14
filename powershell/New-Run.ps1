@@ -34,15 +34,16 @@ $paramChoices = @()
 $paramChoices += ($presets | ForEach-Object { "preset: $_" })
 $paramChoices += "current active CSV"
 
-function Get-KeyParamText([string]$csvPath) {
+function Get-ParamText([string]$csvPath) {
+    # Show the ENTIRE active parameter set (every row's Variable = File1 value),
+    # so nothing is hidden -- the pane scrolls.
     if (-not (Test-Path $csvPath)) { return "(CSV not found: $csvPath)" }
     try { $rows = @(Import-Csv -LiteralPath $csvPath) } catch { return "(could not read CSV)" }
-    $keys = 'frameRate','spatialRes','maxSize','minSize','thrARScl','sigThr','minDur','sourceSensitivity','smoXY','detectGlo','gloDur'
-    $lines = @($csvPath, "")
+    $lines = @($csvPath, ("{0} parameters (File1 column):" -f @($rows | Where-Object { $_.Variable }).Count), "")
     foreach ($r in $rows) {
-        if ($r.Variable -in $keys) {
-            $tag = if ($r.Variable -eq 'detectGlo') { if ($r.File1 -eq '1') { '   (global signal ON)' } else { '   (global signal OFF)' } } else { '' }
-            $lines += ("{0,-20} = {1}{2}" -f $r.Variable, $r.File1, $tag)
+        if ($r.Variable) {
+            $tag = if ($r.Variable -eq 'detectGlo') { if ($r.File1 -eq '1') { '   <- global signal ON' } else { '   <- global signal OFF' } } else { '' }
+            $lines += ("{0,-26} = {1}{2}" -f $r.Variable, $r.File1, $tag)
         }
     }
     return ($lines -join "`r`n")
@@ -57,7 +58,7 @@ function Resolve-ParamCsv([string]$choice) {
 # ---------------------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'AQuA2 Pipeline -- set up a run'
-$form.Size = New-Object System.Drawing.Size(620, 760)
+$form.Size = New-Object System.Drawing.Size(640, 840)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
@@ -88,6 +89,21 @@ function TextField([string]$label, [string]$default, [int]$w = 300) {
     $t = New-Object System.Windows.Forms.TextBox; $t.Text = $default; $t.Size = "$w,24"
     return (Field $label $t)
 }
+function TextFieldBrowse([string]$label, [string]$default) {
+    # Text box + a Browse... button that opens a folder picker.
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = $label; $lbl.Location = "20,$($script:y + 3)"; $lbl.Size = '160,20'
+    $t = New-Object System.Windows.Forms.TextBox; $t.Text = $default; $t.Size = '250,24'; $t.Location = "185,$script:y"
+    $b = New-Object System.Windows.Forms.Button; $b.Text = 'Browse...'; $b.Size = '70,24'; $b.Location = "442,$($script:y - 1)"
+    $b.Add_Click({
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        if ($t.Text -and (Test-Path $t.Text)) { $dlg.SelectedPath = $t.Text }
+        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $t.Text = $dlg.SelectedPath }
+    }.GetNewClosure())
+    $script:panel.Controls.AddRange(@($lbl, $t, $b))
+    $script:y += 30
+    return $t
+}
 function Combo([string]$label, [string[]]$items, [string]$default) {
     $c = New-Object System.Windows.Forms.ComboBox; $c.DropDownStyle = 'DropDownList'; $c.Size = '300,24'
     foreach ($i in $items) { [void]$c.Items.Add($i) }
@@ -103,13 +119,13 @@ function Check([string]$label, [bool]$checked) {
 # --- Basics ---
 Section 'Run'
 $tbProject = TextField 'Project name *' ''
-$tbOut     = TextField 'Output root' (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'AQuA2_runs')
+$tbOut     = TextFieldBrowse 'Output root' (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'AQuA2_runs')
 
 # --- Source ---
 Section 'Source'
 $cbSource  = Combo 'Start from' @('LIF (extract to TIFFs)', 'TIFFs already prepared') 'LIF (extract to TIFFs)'
-$tbLif     = TextField 'LIF source folder' 'C:\CalciumData\lif_test'
-$tbTiff    = TextField 'Input TIFFs folder' ''
+$tbLif     = TextFieldBrowse 'LIF source folder' 'C:\CalciumData\lif_test'
+$tbTiff    = TextFieldBrowse 'Input TIFFs folder' ''
 $ckRecurse = Check 'Recurse into TIFF subfolders' $false
 
 # --- Extraction ---
@@ -131,10 +147,10 @@ $cbPreset  = Combo 'Parameter set' $paramChoices ($paramChoices[-1])
 $tbParams  = New-Object System.Windows.Forms.TextBox
 $tbParams.Multiline = $true; $tbParams.ReadOnly = $true; $tbParams.ScrollBars = 'Vertical'
 $tbParams.Font = New-Object System.Drawing.Font('Consolas', 8)
-$tbParams.Location = "20,$y"; $tbParams.Size = '465,150'; $tbParams.BackColor = [System.Drawing.Color]::WhiteSmoke
-$panel.Controls.Add($tbParams); $y += 158
-$cbPreset.Add_SelectedIndexChanged({ $tbParams.Text = Get-KeyParamText (Resolve-ParamCsv $cbPreset.SelectedItem) })
-$tbParams.Text = Get-KeyParamText (Resolve-ParamCsv $cbPreset.SelectedItem)
+$tbParams.Location = "20,$y"; $tbParams.Size = '490,230'; $tbParams.BackColor = [System.Drawing.Color]::WhiteSmoke
+$panel.Controls.Add($tbParams); $y += 238
+$cbPreset.Add_SelectedIndexChanged({ $tbParams.Text = Get-ParamText (Resolve-ParamCsv $cbPreset.SelectedItem) })
+$tbParams.Text = Get-ParamText (Resolve-ParamCsv $cbPreset.SelectedItem)
 
 # --- Phases ---
 Section 'Phases'
