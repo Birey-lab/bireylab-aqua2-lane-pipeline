@@ -42,6 +42,7 @@
 [CmdletBinding()]
 param(
     [string]$FijiDir      = 'C:\Fiji.app',
+    [string]$FijiExe      = '',   # point at an existing ImageJ-win64.exe to reuse it (skips download)
     [string]$FijiUrl      = 'https://downloads.imagej.net/fiji/latest/fiji-win64.zip',
     [switch]$SkipFiji,
     [switch]$SkipR,
@@ -97,20 +98,50 @@ function Get-WinGet {
 }
 
 function Get-RscriptPath {
-    # Newest R install, if any. Checks the registry then the default path.
+    # Find an existing R ANYWHERE the standard installer or PATH would put it, so a
+    # non-default install location isn't mistaken for "R absent":
+    #   - PATH (Rscript on the PATH),
+    #   - the R-core registry key under BOTH HKLM (all-users) and HKCU (per-user),
+    #   - the default C:\Program Files\R\R-* tree.
+    $cmd = Get-Command Rscript -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
     $roots = @()
-    try {
-        $reg = Get-ItemProperty 'HKLM:\SOFTWARE\R-core\R' -ErrorAction SilentlyContinue
-        if ($reg -and $reg.InstallPath) { $roots += $reg.InstallPath }
-    } catch {}
+    foreach ($hive in 'HKLM:\SOFTWARE\R-core\R', 'HKCU:\SOFTWARE\R-core\R',
+                       'HKLM:\SOFTWARE\WOW6432Node\R-core\R') {
+        try {
+            $reg = Get-ItemProperty $hive -ErrorAction SilentlyContinue
+            if ($reg -and $reg.InstallPath) { $roots += $reg.InstallPath }
+        } catch {}
+    }
     $roots += (Get-ChildItem 'C:\Program Files\R' -Directory -ErrorAction SilentlyContinue |
                Sort-Object Name -Descending | ForEach-Object { $_.FullName })
-    foreach ($r in $roots) {
-        $rs = Join-Path $r 'bin\x64\Rscript.exe'
-        if (Test-Path $rs) { return $rs }
-        $rs = Join-Path $r 'bin\Rscript.exe'
-        if (Test-Path $rs) { return $rs }
+    foreach ($r in ($roots | Select-Object -Unique)) {
+        foreach ($rel in 'bin\x64\Rscript.exe', 'bin\Rscript.exe') {
+            $rs = Join-Path $r $rel
+            if (Test-Path $rs) { return $rs }
+        }
     }
+    return $null
+}
+
+function Find-Fiji {
+    # Locate an existing Fiji so an install in a non-default spot is reused rather
+    # than duplicated. Order: explicit -FijiExe, the -FijiDir default, a handful of
+    # common locations, then the PATH.
+    param([string]$Explicit)
+    $cands = New-Object System.Collections.ArrayList
+    if ($Explicit) { [void]$cands.Add($Explicit) }
+    [void]$cands.Add((Join-Path $FijiDir 'ImageJ-win64.exe'))
+    foreach ($p in @(
+        'C:\Fiji.app\ImageJ-win64.exe',
+        'C:\Program Files\Fiji.app\ImageJ-win64.exe',
+        (Join-Path $env:USERPROFILE 'Fiji.app\ImageJ-win64.exe'),
+        (Join-Path $env:USERPROFILE 'Desktop\Fiji.app\ImageJ-win64.exe'),
+        (Join-Path $env:USERPROFILE 'Downloads\Fiji.app\ImageJ-win64.exe'),
+        'D:\Fiji.app\ImageJ-win64.exe')) { [void]$cands.Add($p) }
+    foreach ($c in $cands) { if ($c -and (Test-Path $c)) { return (Resolve-Path $c).Path } }
+    $cmd = Get-Command 'ImageJ-win64.exe' -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
     return $null
 }
 
@@ -147,11 +178,16 @@ if (-not $DryRun) { New-Item -ItemType Directory -Path $tmp -Force | Out-Null }
 # ===================================================================
 Log ""
 Log "--- Fiji / ImageJ ---" 'Cyan'
-$fijiExe = Join-Path $FijiDir 'ImageJ-win64.exe'
+$defaultFijiExe = Join-Path $FijiDir 'ImageJ-win64.exe'
+$existingFiji   = Find-Fiji $FijiExe
+$fijiExe        = if ($existingFiji) { $existingFiji } else { $defaultFijiExe }
 if (-not $SkipFiji) {
-    if (Test-Path $fijiExe) {
-        Ok "Fiji already present: $fijiExe"
-        Record 'Fiji' 'present' $fijiExe
+    if ($existingFiji) {
+        Ok "Fiji already present: $existingFiji"
+        if ($existingFiji -ne $defaultFijiExe) {
+            Warn "  (not at the default $defaultFijiExe -- pass this to the pipeline: -FijiExe `"$existingFiji`")"
+        }
+        Record 'Fiji' 'present' $existingFiji
     } elseif ($DryRun) {
         Warn "WOULD download Fiji -> $FijiDir  (from $FijiUrl)"
         Record 'Fiji' 'would-install' $FijiDir
