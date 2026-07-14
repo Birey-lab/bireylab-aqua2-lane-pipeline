@@ -1057,8 +1057,31 @@ if ($doExtract) {
         if ($lifCount -eq 0) { Err2 ("No .lif files under {0}" -f $LIFSource); $checksFailed++ }
         else { OK2 ("LIF source: {0} .lif file(s) under {1}" -f $lifCount, $LIFSource) }
     }
+    # Resolve Fiji: if -FijiExe (default C:\Fiji.app\ImageJ-win64.exe) isn't there,
+    # auto-discover an install in a non-default spot before giving up, so a Fiji
+    # installed elsewhere still works without the caller knowing the exact path.
     if (-not (Test-Path -LiteralPath $FijiExe)) {
-        Err2 ("Fiji executable not found: {0} (set -FijiExe to the instance's ImageJ-win64.exe)" -f $FijiExe); $checksFailed++
+        $fijiCandidates = @(
+            'C:\Fiji.app\ImageJ-win64.exe',
+            'C:\Program Files\Fiji.app\ImageJ-win64.exe',
+            (Join-Path $env:USERPROFILE 'Fiji.app\ImageJ-win64.exe'),
+            (Join-Path $env:USERPROFILE 'Desktop\Fiji.app\ImageJ-win64.exe'),
+            (Join-Path $env:USERPROFILE 'Downloads\Fiji.app\ImageJ-win64.exe'),
+            'D:\Fiji.app\ImageJ-win64.exe'
+        )
+        $found = $fijiCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $found) {
+            $cmd = Get-Command 'ImageJ-win64.exe' -ErrorAction SilentlyContinue
+            if ($cmd) { $found = $cmd.Source }
+        }
+        if ($found) {
+            $FijiExe = $found
+            OK2 ("Fiji (auto-discovered): {0}" -f $FijiExe)
+        } else {
+            Err2 ("Fiji executable not found at {0} or common locations." -f $FijiExe)
+            Err2 "  Pass -FijiExe <path to ImageJ-win64.exe>, or install Fiji + R via setup\Install-Dependencies.ps1."
+            $checksFailed++
+        }
     } else { OK2 ("Fiji: {0}" -f $FijiExe) }
     $engineScript = Join-Path (Split-Path $ScriptsDir -Parent) 'fiji-macros\lif_extract_headless.py'
     if (-not (Test-Path $engineScript)) {
