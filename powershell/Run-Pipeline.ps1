@@ -2397,6 +2397,7 @@ elseif ($Consolidate) {
                 Note ("Movies: converting {0} PreCFU GIF(s) -> MP4 with {1}" -f $movieGifCount, $ffmpegResolved)
                 if ($ffVer) { Note ("  ffmpeg: {0}" -f $ffVer) }
                 $movieErrLog = Join-Path $runAuditDir 'movies_ffmpeg_errors.log'
+                if (Test-Path $movieErrLog) { Remove-Item $movieErrLog -Force -ErrorAction SilentlyContinue }
                 $gi = 0
                 foreach ($gif in $srcGifs) {
                     $gi++
@@ -2404,10 +2405,11 @@ elseif ($Consolidate) {
                     $mp4 = Join-Path $upMovies (($gif.BaseName) + '.mp4')
                     if (Test-Path $mp4) { $mp4Skip++; continue }
                     # yuv420p needs even dimensions; scale filter guards odd sizes.
-                    # stderr -> file (NOT 2>&1) so ffmpeg's chatter can't trip EAP=Stop.
+                    # stderr APPENDED to a file (NOT 2>&1) so ffmpeg chatter can't trip
+                    # EAP=Stop, and every failure's error is retained across the loop.
                     & $ffmpegResolved -y -loglevel error -i $gif.FullName `
                         -movflags +faststart -pix_fmt yuv420p `
-                        -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" $mp4 2> $movieErrLog
+                        -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" $mp4 2>> $movieErrLog
                     if ($LASTEXITCODE -eq 0 -and (Test-Path $mp4) -and (Get-Item $mp4).Length -gt 0) {
                         $mp4Ok++
                     } else {
