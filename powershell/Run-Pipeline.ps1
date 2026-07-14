@@ -2460,15 +2460,24 @@ elseif ($Consolidate) {
     $finalPostCFU = (Get-ChildItem $upPost   -File -Filter "*_res_cfu.mat").Count
     $finalMovies  = if (Test-Path (Join-Path $uploadDir 'Movies')) { (Get-ChildItem (Join-Path $uploadDir 'Movies') -File -Filter *.mp4 -ErrorAction SilentlyContinue).Count } else { 0 }
 
-    # v0.8: drop the exact parameters CSV used into the upload folder, named with the project,
-    # so provenance travels with the data. Copy (not hardlink) so it survives cleanup.
-    $usedCsv = Join-Path $runAuditDir 'parameters_for_batch_USED.csv'
-    if (Test-Path $usedCsv) {
-        $csvDest = Join-Path $uploadDir ("{0}_parameters_for_batch_USED.csv" -f $ProjectName)
-        Copy-Item $usedCsv $csvDest -Force
-        Note ("  Parameters CSV copied to {0}" -f (Split-Path $csvDest -Leaf))
+    # Drop the exact parameters CSV used into the upload folder, named with the
+    # project, so provenance travels with the data (uploaded to S3) -- this is the
+    # durable record of "what params produced this run", independent of any git
+    # preset. Copy (not hardlink) so it survives cleanup. Bulletproof: if the
+    # detection-time archive is missing (e.g. a run that skipped Detect), fall back
+    # to the resolved config CSV, then the active default -- so the params CSV is
+    # ALWAYS present in for_upload whenever one exists on the box.
+    $csvDest = Join-Path $uploadDir ("{0}_parameters_for_batch_USED.csv" -f $ProjectName)
+    $paramsSrc = @(
+        (Join-Path $runAuditDir 'parameters_for_batch_USED.csv'),
+        $script:resolvedConfigCSV,
+        'C:\AQuA2\cfg\parameters_for_batch.csv'
+    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if ($paramsSrc) {
+        Copy-Item $paramsSrc $csvDest -Force
+        Note ("  Parameters CSV copied to {0}  (from {1})" -f (Split-Path $csvDest -Leaf), $paramsSrc)
     } else {
-        Warn2 "parameters_for_batch_USED.csv not found in run audit dir; skipping CSV copy into for_upload."
+        Warn2 "No parameters_for_batch.csv found to include in for_upload (checked audit dir, resolved config, and C:\AQuA2\cfg\)."
     }
     # Also drop the human-readable run summary alongside, if present
     $runSummary = Join-Path $runAuditDir 'RUN_SUMMARY.md'

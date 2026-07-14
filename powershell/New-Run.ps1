@@ -206,7 +206,7 @@ $btnSaveP.Add_Click({
     Write-ParamCsv $grid $dest
     if (-not $cbPreset.Items.Contains("preset: $name")) { [void]$cbPreset.Items.Insert(0, "preset: $name") }
     $cbPreset.SelectedItem = "preset: $name"   # reloads grid from the saved file -> edits cleared
-    [void][System.Windows.Forms.MessageBox]::Show("Saved preset '$name'.`r`nCommit cfg\presets\$name.csv (git add/commit/push) to share it with every instance.")
+    [void][System.Windows.Forms.MessageBox]::Show("Saved preset '$name' on this instance -- pick it from the dropdown to reuse it.`r`n`r`nThe exact parameters you actually run with are written into the run's output folder (for_upload, uploaded to S3), so the provenance always travels with the data -- you do NOT need to commit anything to git.")
 }.GetNewClosure())
 
 # --- Phases ---
