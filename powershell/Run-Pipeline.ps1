@@ -1581,7 +1581,20 @@ if (($Split -or $Detect) -and $Lanes -le 0) {
     }
 }
 if ($CFULanes -le 0) {
+    # On a CFU-only resume (Split + Detect both off), the auto-sizer above didn't
+    # run, so $Lanes is still 0 -> derive it from the existing detection lane
+    # folders so CFU gets a sane lane count (not 1). Falls back to CFU=1 only if
+    # nothing is found (then pass -CFULanes yourself).
+    if ($Lanes -le 0) {
+        $existingLaneCount = @(Get-ChildItem $paths['lanes'] -Directory -ErrorAction SilentlyContinue |
+                               Where-Object { $_.Name -match '^lane' }).Count
+        if ($existingLaneCount -gt 0) {
+            $Lanes = $existingLaneCount
+            Note ("CFU-only resume: derived {0} from existing detection lane folders." -f $Lanes)
+        }
+    }
     $CFULanes = [math]::Max([math]::Floor($Lanes * 0.75), 1)
+    if ($CFU) { Note ("CFU lanes: {0}" -f $CFULanes) }
 }
 
 # ==========================================================
