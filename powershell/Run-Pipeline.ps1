@@ -147,7 +147,7 @@
                           + TRIMMED; TIFF-start runs: flat hardlinks)
         - PreCFU/        (per-stem subfolders with _AQuA2.mat)
         - PostCFU/       (flat; one _res_cfu.mat per stem)
-        - Movies/        (one .mp4 per PreCFU GIF overlay; needs ffmpeg)
+        - Movies/        (one .mp4 per AQuA2 _Movie.tif overlay; needs Fiji + ffmpeg)
       Upload phase syncs for_upload/ to S3.
     - Per-run audit subfolder _logs/run_<timestamp>[_<RunName>]/ contains
       all audit artifacts for this run.
@@ -336,12 +336,15 @@ param(
     # default isn't present.
     [string]$FijiExe = 'C:\Fiji\fiji-windows-x64.exe',
 
-    # --- Consolidate: MP4 movies from the PreCFU GIF overlays ---
-    # Consolidate converts each PreCFU *.gif to an .mp4 under for_upload\Movies\.
-    # Needs ffmpeg (installed by setup\Install-Dependencies.ps1). If ffmpeg is
-    # missing at run time the movie step is skipped with a warning, never fatal.
+    # --- Consolidate: MP4 movies from the AQuA2 _Movie.tif overlays ---
+    # Consolidate converts each PreCFU <stem>_AQuA2_Movie.tif (a multi-frame stack)
+    # to an .mp4 under for_upload\Movies\, via Fiji (stack -> AVI) then ffmpeg
+    # (AVI -> MP4) -- ffmpeg alone can't read multi-page TIFF. Needs both Fiji and
+    # ffmpeg (setup\Install-Dependencies.ps1). Missing either -> skipped, never
+    # fatal. Reading big movie TIFFs is slow; -SkipMovies to opt out.
     [switch]$SkipMovies,
     [string]$FfmpegExe = 'ffmpeg',
+    [int]$MovieFps = 20,    # frame rate for the AQuA2 movie MP4s (Fiji AVI -> ffmpeg)
 
     [string]$ScriptsDir = $PSScriptRoot
 )
@@ -2417,63 +2420,79 @@ elseif ($Consolidate) {
     }
     Note ("  PostCFU: hardlinked={0}, copied={1}, already present={2}" -f $postLinked, $postCopied, $postSkipped)
 
-    # ---- Movies: MP4 of each PreCFU GIF overlay (via ffmpeg) ----
-    # AQuA2 writes an animated .gif overlay per recording under PreCFU. Convert
-    # each to a widely-playable .mp4 into for_upload\Movies\. Optional + non-fatal:
-    # if ffmpeg is missing the step is skipped with a warning (run still succeeds).
-    $mp4Ok = 0; $mp4Fail = 0; $mp4Skip = 0; $movieGifCount = 0; $ffmpegResolved = $null
+    # ---- Movies: MP4 of each AQuA2 _Movie.tif overlay ----
+    # AQuA2 writes a MULTI-FRAME overlay movie per recording as <stem>_AQuA2_Movie.tif.
+    # ffmpeg can't read multi-page TIFF (it decodes only the first page -- verified),
+    # so we go Fiji (reads the stack -> AVI via movies_to_avi.py) then ffmpeg
+    # (AVI -> MP4). Optional + NON-FATAL: needs BOTH Fiji and ffmpeg; if either is
+    # missing (or there are no movies), it's skipped with a warning and the run
+    # still succeeds. NOTE: reading large movie TIFFs is slow -- -SkipMovies to opt out.
+    $mp4Ok = 0; $mp4Fail = 0; $mp4Skip = 0; $movieCount = 0
     if (-not $SkipMovies) {
-        $upMovies = Join-Path $uploadDir 'Movies'
-        $srcGifs = @(Get-ChildItem $paths['PreCFU'] -Recurse -File -Filter *.gif -ErrorAction SilentlyContinue |
-                     Where-Object { $_.DirectoryName -notmatch '\\_failures(\\|$)' })
-        $movieGifCount = $srcGifs.Count
-        if ($movieGifCount -eq 0) {
-            Note "Movies: no .gif overlays found under PreCFU; nothing to convert."
+        $upMovies  = Join-Path $uploadDir 'Movies'
+        $srcMovies = @(Get-ChildItem $paths['PreCFU'] -Recurse -File -Filter *_Movie.tif -ErrorAction SilentlyContinue |
+                       Where-Object { $_.DirectoryName -notmatch '\\_failures(\\|$)' })
+        $movieCount = $srcMovies.Count
+        if ($movieCount -eq 0) {
+            Note "Movies: no *_Movie.tif overlays found under PreCFU; nothing to convert."
         } else {
-            # Resolve ffmpeg: -FfmpegExe (default 'ffmpeg' on PATH), else common spots.
+            # Resolve ffmpeg
             $ffmpegResolved = $null
             $ffCmd = Get-Command $FfmpegExe -ErrorAction SilentlyContinue
             if ($ffCmd) { $ffmpegResolved = $ffCmd.Source }
-            else {
-                foreach ($cand in @(
-                    'C:\ffmpeg\bin\ffmpeg.exe',
-                    "$env:ProgramFiles\ffmpeg\bin\ffmpeg.exe",
-                    (Join-Path $env:USERPROFILE 'ffmpeg\bin\ffmpeg.exe'))) {
-                    if (Test-Path $cand) { $ffmpegResolved = $cand; break }
+            else { foreach ($cand in @('C:\ffmpeg\bin\ffmpeg.exe', "$env:ProgramFiles\ffmpeg\bin\ffmpeg.exe", (Join-Path $env:USERPROFILE 'ffmpeg\bin\ffmpeg.exe'))) { if (Test-Path $cand) { $ffmpegResolved = $cand; break } } }
+            # Resolve Fiji (may not have been resolved earlier if no extract ran this invocation)
+            $fijiForMovies = if (Test-Path -LiteralPath $FijiExe) { $FijiExe } else { $null }
+            if (-not $fijiForMovies) {
+                foreach ($r in @('C:\Fiji','C:\Fiji.app','C:\Program Files\Fiji','C:\Program Files\Fiji.app', (Join-Path $env:USERPROFILE 'Fiji'), (Join-Path $env:USERPROFILE 'Fiji.app'), 'D:\Fiji','D:\Fiji.app')) {
+                    foreach ($exe in 'fiji-windows-x64.exe','ImageJ-win64.exe') { $p = Join-Path $r $exe; if (Test-Path $p) { $fijiForMovies = $p; break } }
+                    if ($fijiForMovies) { break }
                 }
             }
-            if (-not $ffmpegResolved) {
-                Warn2 ("Movies: ffmpeg not found ({0} GIF(s) not converted). Install it via setup\Install-Dependencies.ps1 or pass -FfmpegExe, then re-run -Consolidate. Skipping (non-fatal)." -f $movieGifCount)
+            $moviesEngine = Join-Path (Split-Path $ScriptsDir -Parent) 'fiji-macros\movies_to_avi.py'
+            if (-not $ffmpegResolved -or -not $fijiForMovies -or -not (Test-Path $moviesEngine)) {
+                Warn2 ("Movies: skipping {0} movie(s) -- need Fiji AND ffmpeg (Fiji found={1}, ffmpeg found={2}, engine present={3}). Install via setup\Install-Dependencies.ps1 then re-run -Consolidate. (non-fatal)" -f $movieCount, [bool]$fijiForMovies, [bool]$ffmpegResolved, (Test-Path $moviesEngine))
             } else {
                 if (-not (Test-Path $upMovies)) { New-Item -ItemType Directory -Path $upMovies -Force | Out-Null }
-                $ffVer = (& $ffmpegResolved -version 2>$null | Select-Object -First 1)
-                Note ("Movies: converting {0} PreCFU GIF(s) -> MP4 with {1}" -f $movieGifCount, $ffmpegResolved)
-                if ($ffVer) { Note ("  ffmpeg: {0}" -f $ffVer) }
+                $aviDir = Join-Path $projectRoot '_movies_avi'
+                if (-not (Test-Path $aviDir)) { New-Item -ItemType Directory -Path $aviDir -Force | Out-Null }
+                Note ("Movies: {0} *_Movie.tif -> AVI (Fiji, {1}) -> MP4 (ffmpeg). Reading big movie TIFFs is slow." -f $movieCount, $fijiForMovies)
+
+                # 1) Fiji: multi-frame TIFF stacks -> AVI (one headless invocation for all)
+                $moviesLog = Join-Path $runAuditDir 'movies_to_avi.log'
+                $moviesCfg = Join-Path $runAuditDir 'movies_to_avi.cfg'
+                @("input_root=$($paths['PreCFU'])", "output_dir=$aviDir", "fps=$MovieFps", "log=$moviesLog") |
+                    Set-Content -Path $moviesCfg -Encoding ASCII
+                $env:MOVIES_CONFIG = $moviesCfg
+                try {
+                    $mvErr = Join-Path $runAuditDir 'movies_fiji_stderr.log'
+                    $mvOut = Join-Path $runAuditDir 'movies_fiji_stdout.log'
+                    Start-Process -FilePath $fijiForMovies -ArgumentList "--headless --run `"$moviesEngine`"" `
+                        -Wait -NoNewWindow -RedirectStandardOutput $mvOut -RedirectStandardError $mvErr | Out-Null
+                } finally { Remove-Item Env:\MOVIES_CONFIG -ErrorAction SilentlyContinue }
+                $avis = @(Get-ChildItem $aviDir -File -Filter *.avi -ErrorAction SilentlyContinue)
+                Note ("  Fiji produced {0} AVI(s) (log: {1})" -f $avis.Count, $moviesLog)
+
+                # 2) ffmpeg: AVI -> MP4
                 $movieErrLog = Join-Path $runAuditDir 'movies_ffmpeg_errors.log'
                 if (Test-Path $movieErrLog) { Remove-Item $movieErrLog -Force -ErrorAction SilentlyContinue }
-                $gi = 0
-                foreach ($gif in $srcGifs) {
-                    $gi++
-                    if ($gi % 50 -eq 0) { Note ("  ... {0}/{1} movies converted" -f $gi, $movieGifCount) }
-                    $mp4 = Join-Path $upMovies (($gif.BaseName) + '.mp4')
+                foreach ($avi in $avis) {
+                    $mp4 = Join-Path $upMovies ($avi.BaseName + '.mp4')
                     if (Test-Path $mp4) { $mp4Skip++; continue }
-                    # yuv420p needs even dimensions; scale filter guards odd sizes.
-                    # stderr APPENDED to a file (NOT 2>&1) so ffmpeg chatter can't trip
-                    # EAP=Stop, and every failure's error is retained across the loop.
-                    & $ffmpegResolved -y -loglevel error -i $gif.FullName `
-                        -movflags +faststart -pix_fmt yuv420p `
-                        -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" $mp4 2>> $movieErrLog
-                    if ($LASTEXITCODE -eq 0 -and (Test-Path $mp4) -and (Get-Item $mp4).Length -gt 0) {
-                        $mp4Ok++
-                    } else {
+                    & $ffmpegResolved -y -loglevel error -i $avi.FullName -c:v libx264 -pix_fmt yuv420p `
+                        -movflags +faststart -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" $mp4 2>> $movieErrLog
+                    if ($LASTEXITCODE -eq 0 -and (Test-Path $mp4) -and (Get-Item $mp4).Length -gt 0) { $mp4Ok++ }
+                    else {
                         $mp4Fail++
-                        $errTail = if (Test-Path $movieErrLog) { (Get-Content $movieErrLog -Tail 1) } else { '' }
-                        Warn2 ("  Movie FAILED: {0} (exit {1}) {2}" -f $gif.Name, $LASTEXITCODE, $errTail)
-                        if (Test-Path $mp4) { Remove-Item $mp4 -Force -ErrorAction SilentlyContinue }  # drop empty/partial
+                        $errTail = if (Test-Path $movieErrLog) { Get-Content $movieErrLog -Tail 1 } else { '' }
+                        Warn2 ("  Movie FAILED: {0} (exit {1}) {2}" -f $avi.Name, $LASTEXITCODE, $errTail)
+                        if (Test-Path $mp4) { Remove-Item $mp4 -Force -ErrorAction SilentlyContinue }
                     }
                 }
-                Note ("  Movies: {0} converted, {1} failed, {2} already present -> {3}" -f $mp4Ok, $mp4Fail, $mp4Skip, $upMovies)
-                if ($mp4Fail -gt 0) { Warn2 ("  {0} movie(s) failed; see {1}" -f $mp4Fail, $movieErrLog) }
+                Remove-Item $aviDir -Recurse -Force -ErrorAction SilentlyContinue   # tidy AVI intermediates
+                Note ("  Movies: {0} MP4 created, {1} failed, {2} already present -> {3}" -f $mp4Ok, $mp4Fail, $mp4Skip, $upMovies)
+                if ($avis.Count -eq 0)  { Warn2 ("  Fiji produced no AVIs -- check {0} and {1}" -f $moviesLog, $mvErr) }
+                if ($mp4Fail -gt 0)     { Warn2 ("  {0} movie(s) failed ffmpeg; see {1}" -f $mp4Fail, $movieErrLog) }
             }
         }
     } else {
@@ -2586,7 +2605,7 @@ Upload-ready directory:  $uploadDir
 input_TIFFs/ count:      $finalTiffs (hardlinked=$tiffLinked, copied=$tiffCopied)
 PreCFU/ .mat count:      $finalPreCFU (hardlinked=$preLinked, copied=$preCopied)
 PostCFU/ .mat count:     $finalPostCFU (hardlinked=$postLinked, copied=$postCopied)
-Movies/ .mp4 count:      $finalMovies (converted=$mp4Ok, failed=$mp4Fail, from $movieGifCount GIF(s))
+Movies/ .mp4 count:      $finalMovies (converted=$mp4Ok, failed=$mp4Fail, from $movieCount _Movie.tif)
 Run audit dir:           $runAuditDir
 "@
     $consolidateMarker | Out-File $markerConsolidate -Encoding UTF8
@@ -2794,7 +2813,7 @@ if ($Consolidate -and -not $Upload) {
     Write-Host "      PreCFU/        (per-stem subfolders with _AQuA2.mat)"
     Write-Host "      PostCFU/       (flat: one _res_cfu.mat per stem)"
     if (Test-Path (Join-Path $paths['for_upload'] 'Movies')) {
-        Write-Host "      Movies/        (one .mp4 per PreCFU GIF overlay)"
+        Write-Host "      Movies/        (one .mp4 per AQuA2 _Movie.tif overlay)"
     }
     Write-Host ""
     Write-Host "  To upload to S3:"
