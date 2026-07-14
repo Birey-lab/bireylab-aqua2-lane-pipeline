@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
     Provision a fresh AQuA2-pipeline Windows instance with everything the pipeline
-    and downstream analysis need: Fiji (for Phase 0 LIF extraction + the macros),
-    R, optionally RStudio, and the R packages the analysis scripts import.
+    and downstream analysis need: Fiji (Phase 0 LIF extraction + macros), ffmpeg
+    (Consolidate GIF->MP4 movies), R, Rtools45, optionally RStudio, and the R
+    analysis packages (via setup/install_deps.R, the authoritative manifest).
 
 .DESCRIPTION
     IDEMPOTENT and SAFE to re-run: every component is checked first and skipped if
@@ -56,6 +57,8 @@ param(
     [switch]$SkipRStudio,
     [switch]$SkipRPackages,
     [switch]$SkipFfmpeg,
+    [string]$RtoolsDir    = 'C:\rtools45',
+    [switch]$SkipRtools,
     [switch]$DryRun,
     [string]$LogDir       = 'C:\AQuA2\logs'
 )
@@ -63,16 +66,12 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# R packages the analysis scripts import (derived from the library()/require()
-# calls in r/*.R and docs/case-studies/*/scripts/*.R). rhdf5 is Bioconductor;
-# everything else is CRAN.
-$CranPkgs = @(
-    'dplyr','tidyr','readr','stringr','scales','ggplot2','ggpubr','ggrepel',
-    'ggsignif','patchwork','RColorBrewer','igraph','jsonlite','shiny',
-    'R.matlab','hdf5r','glmnet','randomForest','ranger','FSelectorRcpp'
-)
-$BiocPkgs = @('rhdf5')
-# 'grid' is base R (ships with R) -- intentionally not installed.
+# The downstream R analysis dependency list lives in setup/install_deps.R (the
+# authoritative manifest for the AQuA2 CFU pipeline v4.28/v4.30). This script
+# installs R + Rtools45, then runs install_deps.R (idempotent). rhdf5 is the one
+# Bioconductor package; the rest are CRAN. Rtools45 is REQUIRED so packages whose
+# CRAN binary lags the source (e.g. colorspace) compile instead of hanging.
+$DepsRScript = Join-Path $PSScriptRoot 'install_deps.R'
 
 # -------------------------------------------------------------------
 # Logging + helpers
@@ -141,6 +140,21 @@ function Get-FijiExeInDir {
         $p = Join-Path $Dir $n
         if (Test-Path $p) { return (Resolve-Path $p).Path }
     }
+    return $null
+}
+
+function Find-RtoolsMake {
+    # make.exe from an Rtools install (its presence on PATH is what R's
+    # Sys.which('make') checks). Prefer -RtoolsDir, then any C:\rtools4*, then PATH.
+    param([string]$Dir)
+    $m = Join-Path $Dir 'usr\bin\make.exe'
+    if (Test-Path $m) { return (Resolve-Path $m).Path }
+    foreach ($d in (Get-ChildItem 'C:\' -Directory -Filter 'rtools4*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
+        $m = Join-Path $d.FullName 'usr\bin\make.exe'
+        if (Test-Path $m) { return (Resolve-Path $m).Path }
+    }
+    $cmd = Get-Command make -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
     return $null
 }
 
@@ -415,52 +429,76 @@ if (-not $SkipFfmpeg) {
 }
 
 # ===================================================================
-# 4. R packages (CRAN + Bioconductor) -- installs only what's missing
+# 3.6. Rtools45 (R build toolchain) -- REQUIRED before R packages
 # ===================================================================
 Log ""
-Log "--- R packages ---" 'Cyan'
+Log "--- Rtools45 ---" 'Cyan'
+$rtoolsMake = $null
+if (-not $SkipRtools) {
+    $rtoolsMake = Find-RtoolsMake $RtoolsDir
+    if ($rtoolsMake) {
+        Ok "Rtools present: $rtoolsMake"
+        Record 'Rtools45' 'present' $rtoolsMake
+    } elseif ($DryRun) {
+        Warn "WOULD install Rtools45 -> $RtoolsDir (CRAN installer)"
+        Record 'Rtools45' 'would-install' $RtoolsDir
+    } else {
+        try {
+            $page = Invoke-WebRequest 'https://cran.r-project.org/bin/windows/Rtools/rtools45/files/' -UseBasicParsing
+            $exeName = ([regex]'rtools45-\d+-\d+\.exe').Matches($page.Content) |
+                       ForEach-Object { $_.Value } | Where-Object { $_ -notmatch 'aarch64' } |
+                       Select-Object -Unique -First 1
+            if (-not $exeName) { throw "could not find the rtools45 x64 installer on CRAN" }
+            $rt = Join-Path $tmp $exeName
+            Download-File "https://cran.r-project.org/bin/windows/Rtools/rtools45/files/$exeName" $rt
+            Log "  running Rtools45 installer silently (large toolchain; a few minutes)..."
+            Start-Process -FilePath $rt -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+            $rtoolsMake = Find-RtoolsMake $RtoolsDir
+            if ($rtoolsMake) { Ok "Rtools45 installed: $rtoolsMake"; Record 'Rtools45' 'installed' $rtoolsMake }
+            else { throw "post-install check failed: make.exe not found under $RtoolsDir" }
+        } catch {
+            Err "Rtools45 install failed: $($_.Exception.Message)"
+            Record 'Rtools45' 'FAILED' $_.Exception.Message
+        }
+    }
+} else {
+    Log "skipped (-SkipRtools)"; Record 'Rtools45' 'skipped' ''
+}
+
+# ===================================================================
+# 4. R packages -- runs setup/install_deps.R (the authoritative manifest)
+# ===================================================================
+Log ""
+Log "--- R packages (via install_deps.R) ---" 'Cyan'
 if (-not $SkipRPackages) {
-    if (-not $rscript) {
+    if (-not (Test-Path $DepsRScript)) {
+        Err "install_deps.R not found next to this script: $DepsRScript"
+        Record 'R packages' 'FAILED' 'install_deps.R missing'
+    } elseif (-not $rscript) {
         Warn "R not available; cannot install R packages. Install R first, then re-run."
         Record 'R packages' 'skipped-no-R' ''
     } elseif ($DryRun) {
-        Warn ("WOULD ensure {0} CRAN + {1} Bioconductor package(s) (only missing ones get installed):" -f $CranPkgs.Count, $BiocPkgs.Count)
-        Warn ("  CRAN: {0}" -f ($CranPkgs -join ' '))
-        Warn ("  Bioc: {0}" -f ($BiocPkgs -join ' '))
-        Record 'R packages' 'would-install' "$($CranPkgs.Count) CRAN + $($BiocPkgs.Count) Bioc"
+        Warn ("WOULD run {0} (rhdf5 via Bioconductor + the CRAN manifest; missing-only, source-compiled with Rtools)" -f $DepsRScript)
+        if (-not $rtoolsMake) { Warn "  NOTE: Rtools not present -- install_deps.R will stop() until Rtools45 is installed." }
+        Record 'R packages' 'would-install' 'install_deps.R'
     } else {
         try {
-            # Idempotent R snippet: install only packages not already present.
-            $cranList = ($CranPkgs | ForEach-Object { "'$_'" }) -join ','
-            $biocList = ($BiocPkgs | ForEach-Object { "'$_'" }) -join ','
-            $rCode = @"
-options(repos = c(CRAN = 'https://cloud.r-project.org'))
-cran <- c($cranList)
-bioc <- c($biocList)
-inst <- rownames(installed.packages())
-miss <- setdiff(cran, inst)
-cat('CRAN missing:', if (length(miss)) paste(miss, collapse=' ') else '(none)', '\n')
-if (length(miss)) install.packages(miss)
-if (length(bioc)) {
-  bmiss <- setdiff(bioc, rownames(installed.packages()))
-  cat('Bioc missing:', if (length(bmiss)) paste(bmiss, collapse=' ') else '(none)', '\n')
-  if (length(bmiss)) {
-    if (!requireNamespace('BiocManager', quietly=TRUE)) install.packages('BiocManager')
-    BiocManager::install(bmiss, update=FALSE, ask=FALSE)
-  }
-}
-all <- c(cran, bioc)
-final <- rownames(installed.packages())
-stillmiss <- setdiff(all, final)
-if (length(stillmiss)) { cat('STILL MISSING:', paste(stillmiss, collapse=' '), '\n'); quit(status=2) }
-cat('All', length(all), 'packages present.\n')
-"@
-            $rFile = Join-Path $tmp 'install_packages.R'
-            Set-Content -Path $rFile -Value $rCode -Encoding ASCII
-            Log "  running R package install (only missing packages; this can take a while)..."
-            $rc = Invoke-Native $rscript @('--vanilla', $rFile)
-            if ($rc -eq 0) { Ok "R packages present"; Record 'R packages' 'installed/present' "$($CranPkgs.Count)+$($BiocPkgs.Count)" }
-            else { Err "some R packages are still missing (see log above)"; Record 'R packages' 'INCOMPLETE' "exit $rc" }
+            # install_deps.R checks Sys.which('make'); put Rtools on PATH (and set
+            # RTOOLS45_HOME) for this child so the check passes and source builds work.
+            $prevPath = $env:PATH
+            $prevHome = $env:RTOOLS45_HOME
+            $rtoolsBin = Join-Path $RtoolsDir 'usr\bin'
+            if (Test-Path $rtoolsBin) { $env:PATH = "$rtoolsBin;$env:PATH"; $env:RTOOLS45_HOME = $RtoolsDir }
+            elseif (-not $SkipRtools) { Warn "Rtools bin not found at $rtoolsBin; install_deps.R may stop() on the make check." }
+            Log "  running install_deps.R (missing-only; source compiles can take a while)..."
+            try {
+                $rc = Invoke-Native $rscript @('--vanilla', $DepsRScript)
+            } finally {
+                $env:PATH = $prevPath
+                if ($null -ne $prevHome) { $env:RTOOLS45_HOME = $prevHome } else { Remove-Item Env:\RTOOLS45_HOME -ErrorAction SilentlyContinue }
+            }
+            if ($rc -eq 0) { Ok "R packages installed + verified (install_deps.R)"; Record 'R packages' 'installed/present' 'install_deps.R' }
+            else { Err "install_deps.R reported missing/broken packages (exit $rc) -- see the log above"; Record 'R packages' 'INCOMPLETE' "exit $rc" }
         } catch {
             Err "R package install failed: $($_.Exception.Message)"
             Record 'R packages' 'FAILED' $_.Exception.Message

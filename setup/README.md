@@ -35,14 +35,22 @@ Fiji builds use `Fiji.app\ImageJ-win64.exe`; the script detects either.)
 | Component | Default | Source | How |
 |---|---|---|---|
 | Fiji/ImageJ | `C:\Fiji` (bundled JDK) | downloads.imagej.net | download + unzip |
-| R | latest | CRAN / winget `RProject.R` | silent installer |
-| RStudio | latest | winget `Posit.RStudio` | silent installer (skipped if no winget) |
 | ffmpeg | `C:\ffmpeg` | winget `Gyan.FFmpeg` / gyan.dev | winget, else static build unzip |
-| R packages | — | CRAN + Bioconductor | `install.packages` / `BiocManager` (missing only) |
+| R | latest | CRAN / winget `RProject.R` | silent installer |
+| Rtools45 | `C:\rtools45` | CRAN | silent installer |
+| RStudio | latest | winget `Posit.RStudio` | silent installer (skipped if no winget) |
+| R packages | — | `setup/install_deps.R` | Rscript (missing-only, source-compiled) |
 
-ffmpeg is used by the pipeline's Consolidate step to turn PreCFU GIF overlays into
-MP4 movies. `-SkipFfmpeg` to opt out; the pipeline degrades gracefully (skips the
-Movies folder with a warning) if it's absent.
+- **ffmpeg** — used by the pipeline's Consolidate step to turn PreCFU GIF overlays
+  into MP4 movies. `-SkipFfmpeg` to opt out; the pipeline skips the Movies folder
+  with a warning if it's absent.
+- **Rtools45** — REQUIRED so R packages whose CRAN binary lags the source (e.g.
+  `colorspace`) compile instead of hanging on the source-build prompt.
+- **R packages** — the authoritative manifest is
+  [`setup/install_deps.R`](install_deps.R) (AQuA2 CFU pipeline v4.28/v4.30). The
+  provisioner sets Rtools on PATH and runs it; it's idempotent (skips what's
+  installed) and verifies every package actually loads. Edit that one file to
+  change the analysis dependency list.
 
 R packages provisioned (from `library()`/`require()` in the analysis scripts):
 `dplyr tidyr readr stringr scales ggplot2 ggpubr ggrepel ggsignif patchwork
