@@ -28,7 +28,7 @@ def ref(total, fi, mode, start_sec, amount, unit_seconds):
         n_keep = 1
     short = 0
     if mode == "middle":
-        start = math.floor(start_sec / fi) + 1
+        start = math.floor((total - n_keep) / 2) + 1   # centered
         end = start + n_keep - 1
     elif mode == "last":
         end = total
@@ -83,6 +83,8 @@ def main():
     # Frame-unit spot checks (no float-floor ambiguity) + the bad-window case.
     assert E.compute_trim_frames(1200, 1.0, "last", 0, 500, False) == (701, 1200, False, False)
     assert E.compute_trim_frames(1200, 1.0, "first", 15, 500, False)[:2] == (16, 515)
+    # middle is a true centered window (distinct from first): 500 of 1200 -> 351-850
+    assert E.compute_trim_frames(1200, 1.0, "middle", 0, 500, False) == (351, 850, False, False)
     _, _, _, bad = E.compute_trim_frames(1200, 0.05, "first", 100, 10, True)
     assert bad, "expected a bad (skip) window when trim start is past end of recording"
     print("exact spot-checks: OK")

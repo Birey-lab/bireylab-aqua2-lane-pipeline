@@ -170,16 +170,23 @@ def frame_interval_seconds(imp):
 
 
 def compute_trim_frames(total_frames, fi, trim_mode, trim_start_sec, trim_amount, trim_unit_seconds):
-    # Returns (start, end, short, bad) mirroring the macro's computeTrimFrames.
-    amt = trim_amount
-    n_keep = amt
+    # Returns (start, end, short, bad). Duration is FRAME-based: for seconds we keep
+    # floor(amount/fi) whole frames, so it never needs the rate to divide evenly --
+    # e.g. 60 s at 19.07 Hz keeps 1144 frames (~59.95 s). The three modes are
+    # genuinely distinct:
+    #   first  -> the FIRST n_keep frames, after an optional -TrimStartSec lead-in
+    #             to skip (0 = from the very start)
+    #   middle -> the CENTER n_keep frames (centered on the recording midpoint;
+    #             -TrimStartSec is ignored)
+    #   last   -> the FINAL n_keep frames
+    n_keep = trim_amount
     if trim_unit_seconds:
-        n_keep = int(amt / fi)  # floor for positive values
+        n_keep = int(trim_amount / fi)  # floor -> closest whole-frame count
     if n_keep < 1:
         n_keep = 1
     short = False
     if trim_mode == "middle":
-        start = int(trim_start_sec / fi) + 1
+        start = int((total_frames - n_keep) / 2) + 1   # centered window
         end = start + n_keep - 1
     elif trim_mode == "last":
         end = total_frames
@@ -188,7 +195,7 @@ def compute_trim_frames(total_frames, fi, trim_mode, trim_start_sec, trim_amount
             start = 1
             short = True
     else:  # "first"
-        start = int(trim_start_sec / fi) + 1
+        start = int(trim_start_sec / fi) + 1           # optional lead-in skip
         end = start + n_keep - 1
     if start < 1:
         start = 1
@@ -619,7 +626,7 @@ def main():
     if do_trim:
         unit = "s" if trim_unit_seconds else " frames"
         if trim_mode == "middle":
-            trim_desc = "middle %s%s starting %ss in" % (trim_amount, unit, trim_start_sec)
+            trim_desc = "centered %s%s" % (trim_amount, unit)
         elif trim_mode == "last":
             trim_desc = "keep FINAL %s%s" % (trim_amount, unit)
         else:
