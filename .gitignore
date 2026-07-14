@@ -28,3 +28,7 @@ PreCFU_*/
 .DS_Store
 Thumbs.db
 *.backup-pre-comprehensive
+
+# Python bytecode from running fiji-macros tests locally
+__pycache__/
+*.pyc
