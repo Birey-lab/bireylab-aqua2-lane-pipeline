@@ -8,10 +8,13 @@
 # (which reads AVI fine). Two hops, but each is a tool doing what it's reliable at.
 #
 # Driven by a key=value config file whose path is in env var MOVIES_CONFIG:
-#   input_root  root to scan recursively for *_Movie.tif (PreCFU)
-#   output_dir  where to write the .avi files
-#   fps         AVI frame rate (default 20)
-#   log         run log path
+#   input_root   root to scan recursively for *_Movie.tif (PreCFU)
+#   output_dir   where to write the .avi files
+#   fps          AVI frame rate (default 20)
+#   compression  AVI codec: PNG (lossless, default), Uncompressed (lossless,
+#                huge), or JPEG (lossy, small). PNG keeps the Fiji->AVI hop
+#                lossless so the only quality loss is ffmpeg's final encode.
+#   log          run log path
 # Exit is implicit; per-file failures are logged and counted, never fatal.
 
 import os
@@ -46,6 +49,7 @@ def main():
     root = cfg.get('input_root', '')
     outdir = cfg.get('output_dir', '')
     fps = cfg.get('fps', '20')
+    compression = cfg.get('compression', 'PNG')  # PNG lossless by default
     logpath = cfg.get('log', '')
 
     logf = open(logpath, 'w') if logpath else None
@@ -83,6 +87,7 @@ def main():
     w(' input_root: %s' % root)
     w(' output_dir: %s' % outdir)
     w(' fps: %s' % fps)
+    w(' compression: %s' % compression)
     w(' found %d _Movie.tif file(s)' % len(movies))
     w('=============================================')
 
@@ -97,8 +102,9 @@ def main():
             w('  [FAIL] %s (could not open)' % base); failed += 1; continue
         try:
             n = imp.getStackSize()
-            # AVI writer: JPEG compression keeps the intermediate reasonable.
-            IJ.run(imp, "AVI... ", "compression=JPEG frame=%s save=[%s]" % (fps, avi))
+            # AVI writer. PNG (default) is lossless so no quality is lost here;
+            # the only lossy step is ffmpeg's final H.264 encode downstream.
+            IJ.run(imp, "AVI... ", "compression=%s frame=%s save=[%s]" % (compression, fps, avi))
             if os.path.exists(avi) and os.path.getsize(avi) > 0:
                 w('  [OK]   %s | %d frames -> %s' % (base, n, os.path.basename(avi))); ok += 1
             else:

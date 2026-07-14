@@ -345,6 +345,15 @@ param(
     [switch]$SkipMovies,
     [string]$FfmpegExe = 'ffmpeg',
     [int]$MovieFps = 20,    # frame rate for the AQuA2 movie MP4s (Fiji AVI -> ffmpeg)
+    # Movie quality. The Fiji->AVI hop is LOSSLESS (PNG); the only lossy step is
+    # ffmpeg's H.264 encode. -MovieCrf sets that quality: lower = higher fidelity
+    # / bigger file (17 is visually transparent; 23 is ffmpeg's default). Ignored
+    # when -MovieLossless is set, which encodes mathematically lossless (qp 0,
+    # yuv444p = no color subsampling) -- best possible, but larger files that
+    # won't play in Safari/QuickTime. Default yuv420p is universally playable.
+    [ValidateRange(0,51)][int]$MovieCrf = 17,
+    [switch]$MovieLossless,
+    [ValidateSet('PNG','Uncompressed','JPEG')][string]$MovieAviCompression = 'PNG',
 
     [string]$ScriptsDir = $PSScriptRoot
 )
@@ -2465,7 +2474,8 @@ elseif ($Consolidate) {
                 # 1) Fiji: multi-frame TIFF stacks -> AVI (one headless invocation for all)
                 $moviesLog = Join-Path $runAuditDir 'movies_to_avi.log'
                 $moviesCfg = Join-Path $runAuditDir 'movies_to_avi.cfg'
-                @("input_root=$($paths['PreCFU'])", "output_dir=$aviDir", "fps=$MovieFps", "log=$moviesLog") |
+                @("input_root=$($paths['PreCFU'])", "output_dir=$aviDir", "fps=$MovieFps",
+                  "compression=$MovieAviCompression", "log=$moviesLog") |
                     Set-Content -Path $moviesCfg -Encoding ASCII
                 $env:MOVIES_CONFIG = $moviesCfg
                 try {
@@ -2479,13 +2489,22 @@ elseif ($Consolidate) {
                 $avis = @(Get-ChildItem $aviDir -File -Filter *.avi -ErrorAction SilentlyContinue)
                 Note ("  Fiji produced {0} AVI(s) (log: {1})" -f $avis.Count, $moviesLog)
 
-                # 2) ffmpeg: AVI -> MP4
+                # 2) ffmpeg: AVI -> MP4 (the only lossy step). -MovieLossless =
+                # mathematically lossless (qp 0, yuv444p, no chroma subsampling);
+                # otherwise CRF-based high quality with universally-playable yuv420p.
+                if ($MovieLossless) {
+                    $ffQualArgs = @('-c:v','libx264','-preset','veryslow','-qp','0','-pix_fmt','yuv444p')
+                    Note ("  ffmpeg: lossless (qp 0, yuv444p) -- larger files, limited player support")
+                } else {
+                    $ffQualArgs = @('-c:v','libx264','-preset','slow','-crf',"$MovieCrf",'-pix_fmt','yuv420p')
+                    Note ("  ffmpeg: CRF {0} (yuv420p); lower CRF = higher fidelity. -MovieLossless for exact." -f $MovieCrf)
+                }
                 $movieErrLog = Join-Path $runAuditDir 'movies_ffmpeg_errors.log'
                 if (Test-Path $movieErrLog) { Remove-Item $movieErrLog -Force -ErrorAction SilentlyContinue }
                 foreach ($avi in $avis) {
                     $mp4 = Join-Path $upMovies ($avi.BaseName + '.mp4')
                     if (Test-Path $mp4) { $mp4Skip++; continue }
-                    & $ffmpegResolved -y -loglevel error -i $avi.FullName -c:v libx264 -pix_fmt yuv420p `
+                    & $ffmpegResolved -y -loglevel error -i $avi.FullName @ffQualArgs `
                         -movflags +faststart -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" $mp4 2>> $movieErrLog
                     if ($LASTEXITCODE -eq 0 -and (Test-Path $mp4) -and (Get-Item $mp4).Length -gt 0) { $mp4Ok++ }
                     else {
