@@ -1462,9 +1462,13 @@ if ($doExtract) {
     # stdout/stderr to files (also sidesteps the native-stderr/EAP=Stop issue --
     # no pipeline involved). NOTE: the current launcher REJECTS --console
     # ("Ignoring invalid argument"), so it is intentionally omitted.
+    # ArgumentList MUST be an ARRAY (one element per token): a single joined
+    # string "--headless --run <path>" makes the launcher reject --run
+    # ("Ignoring invalid argument: --run") and the engine never runs -- verified
+    # on the instance. The array form quotes each token correctly.
     try {
         $proc = Start-Process -FilePath $FijiExe `
-            -ArgumentList "--headless --run `"$engineScript`"" `
+            -ArgumentList '--headless','--run',$engineScript `
             -Wait -NoNewWindow -PassThru `
             -RedirectStandardOutput $fijiOut -RedirectStandardError $fijiErr
         if ($proc) { Note ("Fiji exited with code {0}" -f $proc.ExitCode) }
@@ -2467,7 +2471,9 @@ elseif ($Consolidate) {
                 try {
                     $mvErr = Join-Path $runAuditDir 'movies_fiji_stderr.log'
                     $mvOut = Join-Path $runAuditDir 'movies_fiji_stdout.log'
-                    Start-Process -FilePath $fijiForMovies -ArgumentList "--headless --run `"$moviesEngine`"" `
+                    # ArgumentList as an ARRAY (see the extract launch above): a
+                    # single joined string makes the launcher reject --run.
+                    Start-Process -FilePath $fijiForMovies -ArgumentList '--headless','--run',$moviesEngine `
                         -Wait -NoNewWindow -RedirectStandardOutput $mvOut -RedirectStandardError $mvErr | Out-Null
                 } finally { Remove-Item Env:\MOVIES_CONFIG -ErrorAction SilentlyContinue }
                 $avis = @(Get-ChildItem $aviDir -File -Filter *.avi -ErrorAction SilentlyContinue)
