@@ -1,9 +1,28 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.9.0 (2026-07-01).
+    Version 0.9.1 (2026-07-14).
 
 .DESCRIPTION
+    v0.9.1 changes: stall-detector correctness + splitter recursion, all found
+    during the first full-scale real-data run (292 TIFFs).
+    - Per-lane stall counters no longer false-fire. The DETECTION per-lane counter
+      and Find-StuckFile used `Get-ChildItem -Include` with no `-Recurse`, which
+      matches nothing, so every lane's completion count was pinned at 0 -> endless
+      false [STALL WARN]/[ESCALATED]/[AUTO-SKIP] (and auto-skip was a silent no-op).
+      Added `-Recurse`. The CFU per-lane counter failed differently: it recursed
+      from the lane root, but CFU lanes are directory JUNCTIONS and `-Recurse`
+      doesn't reliably cross reparse points -> also pinned at 0. Now enumerates each
+      junction and reads it via direct access. Net: auto-skip fires only on genuine
+      hangs (important, since the CFU auto-skip kills the worker).
+    - Splitter can recurse. Split-IntoLanes.ps1 gains an opt-in `-Recurse` (with a
+      hard duplicate-filename collision guard); Run-Pipeline.ps1 gains `-RecurseInput`
+      that drives BOTH the splitter and the pre-flight input count, so they always
+      agree (previously pre-flight recursed while Split took top-level only, so
+      nested inputs counted N but Split moved 0 and Detect died mid-run).
+    - Cosmetic: "Junctions ready: N lane folders" counted with `^lane`, which never
+      matches `cfu_laneNN` -> always printed 0. Fixed to `^cfu_lane`.
+
     v0.9.0 changes: adds the consolidated Fiji input-prep tool
     (fiji-macros/LIF_Extract_and_Trim.ijm: .lif -> raw + trimmed TIFFs with the
     measured Hz appended to each filename). Run-Pipeline.ps1 itself is UNCHANGED
@@ -252,6 +271,7 @@ param(
     [bool]$Upload       = $false,
     [bool]$Cleanup      = $false,   # v0.8: destructive -- remove intermediates + rename to <ProjectName>_AQuA2/. OFF by default; verified before deleting.
     [int]$MaxDetectRelaunch = 3,    # v0.8: bounded auto-relaunch if detection workers die with files remaining
+    [switch]$RecurseInput,          # v0.9.1: recurse into -InputTIFFs subfolders when splitting (default OFF = top-level only). Keeps the pre-flight count and the splitter consistent.
 
     # --- Detection parameters ---
     [int]$Lanes = 0,
@@ -358,7 +378,10 @@ function Find-StuckFile {
     # A TIFF is "stuck" if no corresponding _AQuA2.mat exists ANYWHERE under the results root.
     # We search recursively because the worker writes to subfolders like lane01_results/.
     param([string]$LaneFolder, [string]$ResultsRoot)
-    $laneTiffs = @(Get-ChildItem $LaneFolder -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+    # NOTE: -Recurse is REQUIRED. Get-ChildItem -Include matches nothing unless the path
+    # ends in \* or -Recurse is present; without it $laneTiffs is always empty and this
+    # helper returns $null, silently disabling auto-skip. (v0.9.1 fix.)
+    $laneTiffs = @(Get-ChildItem $LaneFolder -File -Recurse -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
                    Where-Object { $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
     foreach ($t in $laneTiffs) {
         $stem = [System.IO.Path]::GetFileNameWithoutExtension($t.Name)
@@ -995,7 +1018,16 @@ if ($Split) {
         Err2 "InputTIFFs folder missing or not specified (required for -Split)"
         $checksFailed++
     } else {
-        $tifFiles = Get-ChildItem -Path $InputTIFFs -Recurse -Include *.tif,*.tiff -File
+        # v0.9.1: count the SAME files the splitter will actually move. Split-IntoLanes reads
+        # top-level only unless -Recurse is passed; gating both on -RecurseInput keeps this
+        # pre-flight count honest (previously this always recursed while Split took top-level
+        # only, so nested inputs showed N here but Split moved 0 and Detect then died).
+        $tifFiles = if ($RecurseInput) {
+                        Get-ChildItem -Path $InputTIFFs -Recurse -Include *.tif,*.tiff -File
+                    } else {
+                        Get-ChildItem -Path $InputTIFFs -File | Where-Object { $_.Extension -ieq '.tif' -or $_.Extension -ieq '.tiff' }
+                    }
+        $tifFiles = @($tifFiles | Where-Object { $_.Name -notlike '._*' })
         $inputCount = $tifFiles.Count
         $inputSizeGB = [math]::Round(($tifFiles | Measure-Object Length -Sum).Sum / 1GB, 2)
         if ($inputCount -eq 0) {
@@ -1280,7 +1312,7 @@ if ($Split) {
     Phase 1 ("Split {0} TIFFs into {1} lanes" -f $inputCount, $Lanes)
     $start = Get-Date
     $splitter = Join-Path $ScriptsDir 'Split-IntoLanes.ps1'
-    & $splitter -Source $InputTIFFs -LaneRoot $paths['lanes'] -Lanes $Lanes -Execute
+    & $splitter -Source $InputTIFFs -LaneRoot $paths['lanes'] -Lanes $Lanes -Execute -Recurse:$RecurseInput
     $laneFolders = Get-ChildItem $paths['lanes'] -Directory | Where-Object { $_.Name -match '^lane' }
     Note ("Created {0} lane folders" -f $laneFolders.Count)
     PhaseEnd 1 "Split" $start $null
@@ -1412,7 +1444,11 @@ if ($Detect) {
             # Worker writes output to PreCFU/laneNN_results/<stem>_AQuA2.mat,
             # so we search by stem (filename match) anywhere under PreCFU rather than
             # guessing the output directory.
-            $expectedTiffs = @(Get-ChildItem $laneDir.FullName -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+            # NOTE: -Recurse is REQUIRED here. Get-ChildItem -Include matches nothing without
+            # -Recurse (or a \* path), so before v0.9.1 $expectedTiffs was always empty ->
+            # $laneCompleted pinned at 0 -> the stall clock never advanced -> false WARN/
+            # ESCALATE/AUTO-SKIP on every lane while the run progressed fine. (v0.9.1 fix.)
+            $expectedTiffs = @(Get-ChildItem $laneDir.FullName -File -Recurse -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
                                Where-Object { $_.Directory.FullName -notmatch '\\_stalled(\\|$)' })
             $laneCompleted = 0
             foreach ($t in $expectedTiffs) {
@@ -1647,7 +1683,8 @@ if ($CFU) {
     Note ("Detection .mat files: {0}" -f $matCount)
     Note "Building CFU lane junctions..."
     & $builder -Root $paths['PreCFU'] -LaneRoot $paths['CFU_lanes'] -Lanes $CFULanes -Execute
-    $cfuLaneFolders = Get-ChildItem $paths['CFU_lanes'] -Directory | Where-Object { $_.Name -match '^lane' }
+    # CFU lane folders are named cfu_laneNN, so '^lane' matched none -> "Junctions ready: 0". (v0.9.1 fix.)
+    $cfuLaneFolders = Get-ChildItem $paths['CFU_lanes'] -Directory | Where-Object { $_.Name -match '^cfu_lane' }
     Note ("Junctions ready: {0} lane folders" -f $cfuLaneFolders.Count)
 
     # --- 3b: clustering ---
@@ -1723,8 +1760,18 @@ if ($CFU) {
 
         foreach ($laneDir in $cfuLaneFolders) {
             $laneName = $laneDir.Name
-            # CFU input files are _AQuA2.mat (via junctions). Check completions by stem-match in POST.
-            $laneMats = @(Get-ChildItem $laneDir.FullName -File -Filter "*_AQuA2.mat" -Recurse -ErrorAction SilentlyContinue)
+            # CFU input files are _AQuA2.mat reached THROUGH directory junctions (each
+            # cfu_laneNN\ holds junctions -> the real result folders; see Build-CFU-Lanes.ps1).
+            # Get-ChildItem -Recurse from the lane root does NOT reliably descend through
+            # junction reparse points (behavior differs by PowerShell version), so before
+            # v0.9.1 this count read 0 all run -> false CFU stalls. Fix: list each junction as
+            # a top-level child dir, then read its contents via DIRECT access (Get-ChildItem on
+            # the junction path itself), which resolves through the junction reliably. The real
+            # result folder holds the _AQuA2.mat at its top level, so no inner recurse is needed.
+            $laneMats = @(
+                Get-ChildItem $laneDir.FullName -Directory -ErrorAction SilentlyContinue |
+                    ForEach-Object { Get-ChildItem $_.FullName -File -Filter '*_AQuA2.mat' -ErrorAction SilentlyContinue }
+            )
             $laneCompleted = 0
             foreach ($m in $laneMats) {
                 $stem = ($m.Name -replace '_AQuA2\.mat$','')
