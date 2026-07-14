@@ -26,7 +26,14 @@ $DefaultCsv = 'C:\AQuA2\cfg\parameters_for_batch.csv'
 function Ask-Text($prompt, $default) {
     $d = if ($default) { " [$default]" } else { "" }
     $v = Read-Host ("{0}{1}" -f $prompt, $d)
-    if ([string]::IsNullOrWhiteSpace($v)) { return $default } else { return $v.Trim() }
+    if ([string]::IsNullOrWhiteSpace($v)) { return $default }
+    $v = $v.Trim()
+    # Strip a matching pair of surrounding quotes -- users often paste quoted paths
+    # (e.g. "C:\Some Path"); the literal quotes would otherwise become part of the value.
+    if ($v.Length -ge 2 -and (($v[0] -eq '"' -and $v[-1] -eq '"') -or ($v[0] -eq "'" -and $v[-1] -eq "'"))) {
+        $v = $v.Substring(1, $v.Length - 2)
+    }
+    return $v
 }
 function Ask-YesNo($prompt, $defaultYes) {
     $d = if ($defaultYes) { '[Y/n]' } else { '[y/N]' }
@@ -43,10 +50,17 @@ function Ask-Choice($prompt, $choices, $default) {
     for ($i = 0; $i -lt $choices.Count; $i++) { Write-Host ("  [{0}] {1}" -f ($i + 1), $choices[$i]) }
     while ($true) {
         $d = if ($default) { " (default: $default)" } else { "" }
-        $v = Read-Host ("Choose 1-{0}{1}" -f $choices.Count, $d)
+        $v = (Read-Host ("Choose 1-{0}{1}" -f $choices.Count, $d)).Trim()
         if ([string]::IsNullOrWhiteSpace($v) -and $default) { return $default }
+        # Accept the item NUMBER...
         if ($v -match '^\d+$' -and [int]$v -ge 1 -and [int]$v -le $choices.Count) { return $choices[[int]$v - 1] }
-        Write-Host "  Enter a number from the list." -ForegroundColor DarkGray
+        # ...or the option TEXT (exact, case-insensitive)...
+        $exact = @($choices | Where-Object { $_ -ieq $v })
+        if ($exact.Count -eq 1) { return $exact[0] }
+        # ...or an unambiguous prefix (e.g. 'sec' -> seconds, 'last' -> last (final)).
+        $pre = @($choices | Where-Object { $_ -like ($v + '*') })
+        if ($pre.Count -eq 1) { return $pre[0] }
+        Write-Host "  Enter a number from the list (or the option's text)." -ForegroundColor DarkGray
     }
 }
 function Show-ParamValues($csvPath) {
