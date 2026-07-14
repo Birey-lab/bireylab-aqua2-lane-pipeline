@@ -303,6 +303,26 @@ param(
     [switch]$Force,
     [switch]$WhatIfMode,
 
+    # --- Phase 0: optional LIF extraction (v0.10) ---
+    # If -LIFSource is given, an Extract phase runs first: it drives Fiji headless
+    # (fiji-macros/lif_extract_headless.py) to turn .lif files into raw+trimmed
+    # TIFFs with measured-Hz filename labels, then feeds the chosen set into Split.
+    # Omit -LIFSource to start from TIFFs exactly as before. These mirror the
+    # interactive macro's options 1:1.
+    [string]$LIFSource = '',
+    [ValidateSet('trimmed','untrimmed','auto')][string]$DetectOn = 'auto',  # which extracted set feeds detection
+    [bool]$SaveUntrimmed = $true,
+    [ValidateSet('none','middle','last','first')][string]$TrimMode = 'none',
+    [double]$TrimStartSec = 15,
+    [double]$TrimAmount = 60,
+    [ValidateSet('seconds','frames')][string]$TrimUnit = 'seconds',
+    [bool]$HzLabel = $true,
+    [int]$HzDecimals = 2,
+    [ValidateSet('warn','drop')][string]$RatePolicy = 'warn',
+    [bool]$SkipTileScans = $true,
+    [switch]$ExtractDryRun,
+    [string]$FijiExe = 'C:\Fiji.app\ImageJ-win64.exe',
+
     [string]$ScriptsDir = $PSScriptRoot
 )
 
@@ -925,6 +945,20 @@ foreach ($p in $paths.Values) {
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 }
 
+# Phase 0 (LIF extraction) is enabled by providing -LIFSource. Its folders are
+# created only then, so non-extract projects stay clean.
+$doExtract = -not [string]::IsNullOrWhiteSpace($LIFSource)
+$doTrim    = ($TrimMode -ne 'none')
+$resolvedDetectOn = ''          # set in pre-flight when extracting
+$engineScript = ''              # set in pre-flight when extracting
+if ($doExtract) {
+    $paths['extracted']     = Join-Path $projectRoot 'extracted'      # mirror of engine output: <lifbase>\{UNTRIMMED,TRIMMED}\
+    $paths['extract_input'] = Join-Path $projectRoot 'extract_input'  # flat staged detection set -> becomes InputTIFFs
+    foreach ($k in 'extracted','extract_input') {
+        if (-not (Test-Path $paths[$k])) { New-Item -ItemType Directory -Path $paths[$k] -Force | Out-Null }
+    }
+}
+
 # Per-run audit subfolder: _logs/run_<timestamp>[_<RunName>]/
 $runTimestamp = $pipelineStart.ToString('yyyyMMdd_HHmmss')
 $runFolderName = if ($RunName) { "run_${runTimestamp}_${RunName}" } else { "run_${runTimestamp}" }
@@ -943,7 +977,11 @@ Note ("Started:           {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Note ("Project name:      {0}" -f $ProjectName)
 Note ("Output base:       {0}" -f $OutputRoot)
 Note ("Project root:      {0}" -f $projectRoot)
-Note ("Input TIFFs:       {0}" -f $InputTIFFs)
+if ($doExtract) {
+    Note ("LIF source:        {0}  (Phase 0 Extract -> TIFFs -> Split)" -f $LIFSource)
+} else {
+    Note ("Input TIFFs:       {0}" -f $InputTIFFs)
+}
 Note ("Run audit dir:     {0}" -f $runAuditDir)
 Note ("Master log:        {0}" -f $masterLog)
 if ($RunName) {
@@ -1010,10 +1048,37 @@ if ($liveWorkers) {
     OK2 "no leftover workers running (clean slate)"
 }
 
+# --- 2.9. LIF extraction prerequisites (Phase 0, when -LIFSource given) ---
+if ($doExtract) {
+    if (-not (Test-Path -LiteralPath $LIFSource)) {
+        Err2 ("LIF source folder not found: {0}" -f $LIFSource); $checksFailed++
+    } else {
+        $lifCount = @(Get-ChildItem -LiteralPath $LIFSource -Recurse -File -Filter *.lif -ErrorAction SilentlyContinue).Count
+        if ($lifCount -eq 0) { Err2 ("No .lif files under {0}" -f $LIFSource); $checksFailed++ }
+        else { OK2 ("LIF source: {0} .lif file(s) under {1}" -f $lifCount, $LIFSource) }
+    }
+    if (-not (Test-Path -LiteralPath $FijiExe)) {
+        Err2 ("Fiji executable not found: {0} (set -FijiExe to the instance's ImageJ-win64.exe)" -f $FijiExe); $checksFailed++
+    } else { OK2 ("Fiji: {0}" -f $FijiExe) }
+    $engineScript = Join-Path (Split-Path $ScriptsDir -Parent) 'fiji-macros\lif_extract_headless.py'
+    if (-not (Test-Path $engineScript)) {
+        Err2 ("Extraction engine not found: {0}" -f $engineScript); $checksFailed++
+    } else { OK2 ("Extract engine: {0}" -f $engineScript) }
+    if (-not $SaveUntrimmed -and -not $doTrim) {
+        Err2 "Extract: nothing to do (-SaveUntrimmed `$false AND -TrimMode none). Enable at least one output."; $checksFailed++
+    }
+    $resolvedDetectOn = if ($DetectOn -eq 'auto') { if ($doTrim) { 'trimmed' } else { 'untrimmed' } } else { $DetectOn }
+    if ($resolvedDetectOn -eq 'trimmed'  -and -not $doTrim)        { Err2 "-DetectOn trimmed but -TrimMode is none (no trimmed set would exist)."; $checksFailed++ }
+    if ($resolvedDetectOn -eq 'untrimmed' -and -not $SaveUntrimmed) { Err2 "-DetectOn untrimmed but -SaveUntrimmed is `$false (no untrimmed set would exist)."; $checksFailed++ }
+    if ($checksFailed -eq 0) { OK2 ("extract plan: save_untrimmed={0}, trim={1}, detect-on={2}" -f $SaveUntrimmed, $TrimMode, $resolvedDetectOn) }
+}
+
 # --- 3. Input TIFFs ---
 $inputCount = 0
 $inputSizeGB = 0
-if ($Split) {
+# When extracting, the input TIFFs don't exist yet (Phase 0 produces them and
+# reassigns $InputTIFFs), so skip the input-required check here.
+if ($Split -and -not $doExtract) {
     if (-not $InputTIFFs -or -not (Test-Path $InputTIFFs)) {
         Err2 "InputTIFFs folder missing or not specified (required for -Split)"
         $checksFailed++
@@ -1142,13 +1207,16 @@ if ($checksFailed -gt 0) {
 Hdr "Plan summary"
 
 # Phase-complete markers (written at end of each successful phase)
+$markerExtract     = Join-Path $paths['logs'] 'PHASE_extract_COMPLETE.txt'
 $markerSplit       = Join-Path $paths['logs'] 'PHASE_split_COMPLETE.txt'
 $markerDetect      = Join-Path $paths['logs'] 'PHASE_detect_COMPLETE.txt'
 $markerCFU         = Join-Path $paths['logs'] 'PHASE_cfu_COMPLETE.txt'
 $markerConsolidate = Join-Path $paths['logs'] 'PHASE_consolidate_COMPLETE.txt'
 $markerUpload      = Join-Path $paths['logs'] 'PHASE_upload_COMPLETE.txt'
 
+$extractLabel = if ($doExtract) { "LIF extract (Phase 0 -> detect on $resolvedDetectOn)" } else { 'LIF extract (Phase 0)' }
 $phaseList = @(
+    @{ name=$extractLabel;                       on=$doExtract;   marker=$markerExtract     },
     @{ name='Split TIFFs into lanes';            on=$Split;       marker=$markerSplit       },
     @{ name='Detection (aqua_lane.exe)';         on=$Detect;      marker=$markerDetect      },
     @{ name='CFU (build junctions + run)';       on=$CFU;         marker=$markerCFU         },
@@ -1236,8 +1304,13 @@ if ($Detect -or $CFU) {
 # Split move warning
 if ($Split) {
     Write-Host ""
-    Warn2 ("Phase 1 (Split) MOVES TIFFs from {0} into {1}\lane<N>\" -f $InputTIFFs, $paths['lanes'])
-    Warn2 "Originals are REMOVED from InputTIFFs. To keep originals, copy them elsewhere first."
+    if ($doExtract) {
+        Warn2 ("Phase 1 (Split) MOVES the Phase-0 extracted {0} TIFFs into {1}\lane<N>\" -f $resolvedDetectOn, $paths['lanes'])
+        Warn2 "Those are hardlinks into extracted\; the extracted\ archive (incl. UNTRIMMED) is preserved."
+    } else {
+        Warn2 ("Phase 1 (Split) MOVES TIFFs from {0} into {1}\lane<N>\" -f $InputTIFFs, $paths['lanes'])
+        Warn2 "Originals are REMOVED from InputTIFFs. To keep originals, copy them elsewhere first."
+    }
 }
 
 Write-Host ""
@@ -1258,6 +1331,121 @@ if (-not $Force) {
         Stop-Transcript | Out-Null
         return
     }
+}
+
+# ==========================================================
+# Phase 0: LIF extraction (optional) -- produces TIFFs, then sets $InputTIFFs
+# ==========================================================
+if ($doExtract) {
+    Phase 'Extract' "LIF extraction (headless Fiji)"
+    $extractStart = Get-Date
+
+    # Engine output is MIRRORED under the project's extracted/ folder so the LIF
+    # source tree is never modified. Config is a key=value file the engine reads
+    # via the LIF_EXTRACT_CONFIG env var (no PowerShell->Fiji arg quoting).
+    $extractLog = Join-Path $runAuditDir 'lif_extract.log'
+    $cfgPath    = Join-Path $runAuditDir 'lif_extract.cfg'
+    $cfgLines = @(
+        "mode=lif",
+        "input=$LIFSource",
+        "output=$($paths['extracted'])",
+        "output_mode=mirror",
+        "save_untrimmed=$($SaveUntrimmed.ToString().ToLower())",
+        "trim_mode=$TrimMode",
+        "trim_start_sec=$TrimStartSec",
+        "trim_amount=$TrimAmount",
+        "trim_unit=$TrimUnit",
+        "hz_label=$($HzLabel.ToString().ToLower())",
+        "hz_decimals=$HzDecimals",
+        "rate_policy=$RatePolicy",
+        "skip_tilescans=$($SkipTileScans.ToString().ToLower())",
+        "dry_run=$($ExtractDryRun.IsPresent.ToString().ToLower())",
+        "log=$extractLog"
+    )
+    Set-Content -Path $cfgPath -Value $cfgLines -Encoding ASCII
+    Copy-Item $cfgPath (Join-Path $runAuditDir 'lif_extract_USED.cfg') -Force -ErrorAction SilentlyContinue
+
+    Note ("Fiji:            {0}" -f $FijiExe)
+    Note ("Engine:          {0}" -f $engineScript)
+    Note ("Config:          {0}" -f $cfgPath)
+    Note ("Detect-on set:   {0}" -f $resolvedDetectOn)
+    Note ("Extract dry-run: {0}" -f $ExtractDryRun.IsPresent)
+    Note "Launching headless Fiji (large LIFs can take a while)..."
+
+    $env:LIF_EXTRACT_CONFIG = $cfgPath
+    try {
+        & $FijiExe --headless --console --run $engineScript 2>&1 |
+            Tee-Object -FilePath (Join-Path $runAuditDir 'fiji_stdout.log') | Out-Null
+    } finally {
+        Remove-Item Env:\LIF_EXTRACT_CONFIG -ErrorAction SilentlyContinue
+    }
+
+    # Fiji's launcher can exit 0 even when the Jython script throws, so verify the
+    # engine log itself: it must exist, reach the TOTALS block, and carry no
+    # Traceback / class-load error.
+    $engineOk = $false
+    if (Test-Path $extractLog) {
+        $logText = Get-Content $extractLog -Raw
+        $engineOk = ($logText -match 'TOTALS') -and ($logText -notmatch 'Traceback|NoClassDefFoundError|UnsupportedClassVersionError')
+    }
+    if (-not $engineOk) {
+        Err2 "LIF extraction did not complete cleanly. Inspect:"
+        Err2 ("  engine log:  {0}" -f $extractLog)
+        Err2 ("  fiji stdout: {0}" -f (Join-Path $runAuditDir 'fiji_stdout.log'))
+        if (Test-Path $extractLog) { Get-Content $extractLog -Tail 15 | ForEach-Object { Warn2 "  | $_" } }
+        Stop-Transcript | Out-Null
+        Write-Error "Phase 0 (LIF extraction) failed."
+        return
+    }
+
+    if ($ExtractDryRun) {
+        Note "Extract DRY-RUN complete -- planned outputs (no files written):"
+        Get-Content $extractLog -Tail 40 | ForEach-Object { Write-Host "  | $_" }
+        Note "Re-run without -ExtractDryRun to write TIFFs and continue into Split."
+        Stop-Transcript | Out-Null
+        return
+    }
+
+    # Stage the chosen set (TRIMMED|UNTRIMMED) from the mirrored per-LIF subfolders
+    # into a FLAT folder that becomes -InputTIFFs. Hardlinked (zero extra disk on
+    # NTFS); the extracted/ archive keeps its own links (incl. the untrimmed copies).
+    $setDir = if ($resolvedDetectOn -eq 'trimmed') { 'TRIMMED' } else { 'UNTRIMMED' }
+    $stage  = $paths['extract_input']
+    $srcTiffs = @(Get-ChildItem $paths['extracted'] -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Directory.Name -ieq $setDir })
+    if ($srcTiffs.Count -eq 0) {
+        Err2 ("No {0} TIFFs found under {1} after extraction." -f $setDir, $paths['extracted'])
+        Stop-Transcript | Out-Null
+        Write-Error "Phase 0 produced no detection inputs."
+        return
+    }
+    # Collision guard: staging is flat by filename (series names must be unique
+    # across LIFs). Fail loudly rather than silently overwrite.
+    $dupes = $srcTiffs | Group-Object Name | Where-Object { $_.Count -gt 1 }
+    if ($dupes) {
+        Err2 "Duplicate filenames across LIFs would collide in the flat detection input:"
+        foreach ($g in $dupes) { Err2 ("  {0} ({1} copies)" -f $g.Name, $g.Count) }
+        Stop-Transcript | Out-Null
+        Write-Error "Phase 0: duplicate extracted filenames; give the series unique names and re-run."
+        return
+    }
+    $linked = 0; $copied = 0
+    foreach ($f in $srcTiffs) {
+        $dest = Join-Path $stage $f.Name
+        if (Test-Path $dest) { continue }
+        try { New-Item -ItemType HardLink -Path $dest -Value $f.FullName -ErrorAction Stop | Out-Null; $linked++ }
+        catch { Copy-Item $f.FullName $dest -Force; $copied++ }
+    }
+    Note ("Staged {0} {1} TIFF(s) for detection (hardlinked={2}, copied={3})" -f $srcTiffs.Count, $setDir, $linked, $copied)
+
+    # From here the pipeline treats the staged flat folder as the input. It is FLAT
+    # by construction, so -RecurseInput is not needed downstream.
+    $InputTIFFs = $stage
+
+    "Extract completed $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')`nDetect-on set: $setDir`nStaged TIFFs: $($srcTiffs.Count)`nInput folder: $stage" |
+        Out-File $markerExtract -Encoding UTF8
+    "Extract completed $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')" | Out-File (Join-Path $runAuditDir 'PHASE_extract_COMPLETE.txt') -Encoding UTF8
+    PhaseEnd 'Extract' "LIF extraction" $extractStart ("{0} {1} TIFFs staged -> Split" -f $srcTiffs.Count, $setDir)
 }
 
 # ==========================================================
