@@ -141,16 +141,73 @@ $cbDetectOn= Combo 'Detect on' @('auto', 'trimmed', 'untrimmed') 'auto'
 $cbRate    = Combo 'Rate mismatch policy' @('warn (keep it)', 'drop (strict)') 'warn (keep it)'
 $ckTile    = Check "Skip TileScan_* series (unless 'Merging')" $true
 
-# --- Parameters ---
-Section 'Detection parameters'
-$cbPreset  = Combo 'Parameter set' $paramChoices ($paramChoices[-1])
-$tbParams  = New-Object System.Windows.Forms.TextBox
-$tbParams.Multiline = $true; $tbParams.ReadOnly = $true; $tbParams.ScrollBars = 'Vertical'
-$tbParams.Font = New-Object System.Drawing.Font('Consolas', 8)
-$tbParams.Location = "20,$y"; $tbParams.Size = '490,230'; $tbParams.BackColor = [System.Drawing.Color]::WhiteSmoke
-$panel.Controls.Add($tbParams); $y += 238
-$cbPreset.Add_SelectedIndexChanged({ $tbParams.Text = Get-ParamText (Resolve-ParamCsv $cbPreset.SelectedItem) })
-$tbParams.Text = Get-ParamText (Resolve-ParamCsv $cbPreset.SelectedItem)
+# --- Parameters (editable) ---
+# Model of the loaded CSV kept as RAW lines so we only ever change the File1 cell
+# (never reformat the file the MATLAB workers read). Grid edits map back by Variable.
+$script:paramRaw = @(); $script:paramVarIdx = -1; $script:paramF1Idx = -1; $script:loadedMap = @{}
+function Load-ParamModel([string]$csvPath) {
+    if (-not (Test-Path $csvPath)) { $script:paramRaw = @(); return @() }
+    $script:paramRaw = @(Get-Content -LiteralPath $csvPath)
+    $cols = $script:paramRaw[0].Split(',')
+    $script:paramVarIdx = [array]::IndexOf($cols, 'Variable')
+    $script:paramF1Idx  = [array]::IndexOf($cols, 'File1')
+    $rows = @(); $script:loadedMap = @{}
+    for ($i = 1; $i -lt $script:paramRaw.Count; $i++) {
+        $c = $script:paramRaw[$i].Split(',')
+        if ($script:paramVarIdx -lt 0 -or $c.Count -le $script:paramF1Idx) { continue }
+        $v = $c[$script:paramVarIdx]; if (-not $v) { continue }
+        $rows += , @($v, $c[$script:paramF1Idx]); $script:loadedMap[$v] = $c[$script:paramF1Idx]
+    }
+    return $rows
+}
+function Get-GridMap($g) {
+    $m = @{}; foreach ($r in $g.Rows) { if (-not $r.IsNewRow) { $m[[string]$r.Cells[0].Value] = [string]$r.Cells[1].Value } }; return $m
+}
+function Grid-Edited($g) {
+    $m = Get-GridMap $g; foreach ($k in $m.Keys) { if ("$($script:loadedMap[$k])" -ne "$($m[$k])") { return $true } }; return $false
+}
+function Write-ParamCsv($g, [string]$destPath) {
+    $m = Get-GridMap $g; $out = @($script:paramRaw[0])
+    for ($i = 1; $i -lt $script:paramRaw.Count; $i++) {
+        $c = $script:paramRaw[$i].Split(',')
+        if ($script:paramVarIdx -ge 0 -and $c.Count -gt $script:paramF1Idx -and $m.ContainsKey($c[$script:paramVarIdx])) {
+            $c[$script:paramF1Idx] = $m[$c[$script:paramVarIdx]]; $out += ($c -join ',')
+        } else { $out += $script:paramRaw[$i] }
+    }
+    Set-Content -LiteralPath $destPath -Value $out -Encoding ASCII
+}
+
+Section 'Detection parameters  (edit any Value, then "Save as preset" to name + keep it)'
+$cbPreset = Combo 'Load parameter set' $paramChoices ($paramChoices[-1])
+$grid = New-Object System.Windows.Forms.DataGridView
+$grid.Location = "20,$y"; $grid.Size = '490,230'
+$grid.AllowUserToAddRows = $false; $grid.RowHeadersVisible = $false; $grid.AllowUserToResizeRows = $false
+$grid.ColumnCount = 2
+$grid.Columns[0].Name = 'Parameter'; $grid.Columns[0].ReadOnly = $true; $grid.Columns[0].Width = 300
+$grid.Columns[1].Name = 'Value'; $grid.Columns[1].Width = 165
+$panel.Controls.Add($grid); $y += 238
+function Reload-Grid {
+    $grid.Rows.Clear()
+    foreach ($r in (Load-ParamModel (Resolve-ParamCsv $cbPreset.SelectedItem))) { [void]$grid.Rows.Add($r[0], $r[1]) }
+}
+$cbPreset.Add_SelectedIndexChanged({ Reload-Grid })
+Reload-Grid
+
+$btnSaveP = New-Object System.Windows.Forms.Button; $btnSaveP.Text = 'Save as preset...'; $btnSaveP.Size = '150,26'; $btnSaveP.Location = "20,$y"
+$panel.Controls.Add($btnSaveP); $y += 34
+$btnSaveP.Add_Click({
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    $name = [Microsoft.VisualBasic.Interaction]::InputBox('Save these parameters as a preset named:', 'Save preset', '')
+    if (-not $name) { return }
+    if ($name -notmatch '^[A-Za-z0-9._-]+$') { [void][System.Windows.Forms.MessageBox]::Show('Name: letters/digits/._- only.'); return }
+    $dest = Join-Path $PresetDir ($name + '.csv')
+    if ((Test-Path $dest) -and ([System.Windows.Forms.MessageBox]::Show("Preset '$name' exists. Overwrite?", 'Confirm', 'YesNo') -ne 'Yes')) { return }
+    if (-not (Test-Path $PresetDir)) { New-Item -ItemType Directory -Path $PresetDir -Force | Out-Null }
+    Write-ParamCsv $grid $dest
+    if (-not $cbPreset.Items.Contains("preset: $name")) { [void]$cbPreset.Items.Insert(0, "preset: $name") }
+    $cbPreset.SelectedItem = "preset: $name"   # reloads grid from the saved file -> edits cleared
+    [void][System.Windows.Forms.MessageBox]::Show("Saved preset '$name'.`r`nCommit cfg\presets\$name.csv (git add/commit/push) to share it with every instance.")
+}.GetNewClosure())
 
 # --- Phases ---
 Section 'Phases'
@@ -159,12 +216,15 @@ $ckCFU     = Check 'CFU' $true
 $ckCons    = Check 'Consolidate' $true
 $ckMovies  = Check 'Make MP4 movies from overlays (needs ffmpeg)' $true
 
-# --- Buttons ---
-$btnPrev = New-Object System.Windows.Forms.Button; $btnPrev.Text = 'Preview command'; $btnPrev.Size = '140,30'; $btnPrev.Location = "20,$y"
-$btnRun  = New-Object System.Windows.Forms.Button; $btnRun.Text = 'Run';  $btnRun.Size = '110,30';  $btnRun.Location = "330,$y"
-$btnCan  = New-Object System.Windows.Forms.Button; $btnCan.Text = 'Cancel'; $btnCan.Size = '90,30';  $btnCan.Location = "450,$y"
-$panel.Controls.AddRange(@($btnPrev, $btnRun, $btnCan))
-$y += 40
+# --- Buttons (fixed bottom bar, always visible above the scrolling panel) ---
+$bottom = New-Object System.Windows.Forms.Panel
+$bottom.Dock = 'Bottom'; $bottom.Height = 46
+$form.Controls.Add($bottom)
+$form.Controls.SetChildIndex($bottom, 0)   # keep the scroll panel filling above it
+$btnPrev = New-Object System.Windows.Forms.Button; $btnPrev.Text = 'Preview command'; $btnPrev.Size = '150,30'; $btnPrev.Location = '14,8'
+$btnRun  = New-Object System.Windows.Forms.Button; $btnRun.Text = 'Run';    $btnRun.Size = '110,30'; $btnRun.Location = '360,8'
+$btnCan  = New-Object System.Windows.Forms.Button; $btnCan.Text = 'Cancel'; $btnCan.Size = '90,30';  $btnCan.Location = '480,8'
+$bottom.Controls.AddRange(@($btnPrev, $btnRun, $btnCan))
 
 # ---------------------------------------------------------------------------
 # Collect -> args hashtable (shared with the post-dialog launch)
@@ -219,6 +279,12 @@ $btnPrev.Add_Click({
     [System.Windows.Forms.MessageBox]::Show((Format-Command $a), 'Equivalent command') | Out-Null
 })
 $btnRun.Add_Click({
+    if (Grid-Edited $grid) {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "You've edited detection parameters but haven't saved them.`r`n`r`nClick 'Save as preset...' first so the run uses a named, reproducible set.",
+            'Save your parameter edits')
+        return
+    }
     $a = Build-Args; if (-not $a) { return }
     $script:runArgs = $a
     $form.Close()
