@@ -75,7 +75,7 @@ else
 // STAGE 2: SETTINGS
 // ============================================================
 trimModes = newArray("No trim (raw only)",
-                     "Middle window (start + length)",
+                     "Middle window (centered)",
                      "Keep FINAL portion",
                      "Keep FIRST portion");
 trimUnits = newArray("seconds", "frames");
@@ -165,7 +165,7 @@ flog = File.open(logPath);
 trimDesc = "DISABLED";
 if (doTrim) {
     unitStr = "s"; if (!trimUnitSeconds) unitStr = " frames";
-    if (trimModeChoice == trimModes[1]) trimDesc = "middle " + TRIM_AMOUNT + unitStr + " starting " + TRIM_START_SEC + "s in";
+    if (trimModeChoice == trimModes[1]) trimDesc = "centered " + TRIM_AMOUNT + unitStr;
     else if (trimModeChoice == trimModes[2]) trimDesc = "keep FINAL " + TRIM_AMOUNT + unitStr;
     else trimDesc = "keep FIRST " + TRIM_AMOUNT + unitStr + " (from " + TRIM_START_SEC + "s in)";
 }
@@ -495,8 +495,8 @@ function computeTrimFrames(totalFrames, fi) {
     if (trimUnitSeconds) nKeep = floor(amt / fi);
     if (nKeep < 1) nKeep = 1;
     short = 0;
-    if (trimModeChoice == trimModes[1]) {          // Middle window
-        startFrame = floor(TRIM_START_SEC / fi) + 1;
+    if (trimModeChoice == trimModes[1]) {          // Middle window (centered)
+        startFrame = floor((totalFrames - nKeep) / 2) + 1;
         endFrame = startFrame + nKeep - 1;
     } else if (trimModeChoice == trimModes[2]) {   // Keep FINAL
         endFrame = totalFrames;

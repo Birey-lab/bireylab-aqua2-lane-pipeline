@@ -316,8 +316,11 @@ param(
     [string]$LIFSource = '',
     [ValidateSet('trimmed','untrimmed','auto')][string]$DetectOn = 'auto',  # which extracted set feeds detection
     [bool]$SaveUntrimmed = $true,
+    # Trim window position: first = beginning (after an optional -TrimStartSec
+    # lead-in to skip), middle = centered, last = end. Duration is frame-based, so
+    # it needn't divide evenly (e.g. 60s @ 19.07Hz keeps 1144 frames ~= 59.95s).
     [ValidateSet('none','middle','last','first')][string]$TrimMode = 'none',
-    [double]$TrimStartSec = 15,
+    [double]$TrimStartSec = 0,     # 'first' lead-in to skip (0 = from the very start); ignored by middle/last
     [double]$TrimAmount = 60,
     [ValidateSet('seconds','frames')][string]$TrimUnit = 'seconds',
     [bool]$HzLabel = $true,
