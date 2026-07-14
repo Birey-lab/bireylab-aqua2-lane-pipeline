@@ -1406,10 +1406,17 @@ if ($doExtract) {
     Note "Launching headless Fiji (large LIFs can take a while)..."
 
     $env:LIF_EXTRACT_CONFIG = $cfgPath
+    # Fiji writes to stderr even on success; with $ErrorActionPreference='Stop'
+    # a merged (2>&1) native stderr line raises a terminating NativeCommandError.
+    # Drop to 'Continue' around the call so success is judged from the engine log,
+    # not from stderr chatter. (The exit code is unreliable anyway.)
+    $prevEAP = $ErrorActionPreference
     try {
+        $ErrorActionPreference = 'Continue'
         & $FijiExe --headless --console --run $engineScript 2>&1 |
             Tee-Object -FilePath (Join-Path $runAuditDir 'fiji_stdout.log') | Out-Null
     } finally {
+        $ErrorActionPreference = $prevEAP
         Remove-Item Env:\LIF_EXTRACT_CONFIG -ErrorAction SilentlyContinue
     }
 
