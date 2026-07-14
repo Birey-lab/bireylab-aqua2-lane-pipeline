@@ -280,6 +280,9 @@ param(
     # --- Detection parameters ---
     [int]$Lanes = 0,
     [string]$ConfigCSV = '',
+    # Named parameter preset from the repo's cfg/presets/<name>.csv (versioned in
+    # git; travels via git pull). Sugar for -ConfigCSV cfg/presets/<name>.csv.
+    [string]$ParamPreset = '',
 
     # --- CFU parameters ---
     [int]$CFULanes = 0,
@@ -939,6 +942,21 @@ $pipelineStart = Get-Date
 # ==========================================================
 # Resolve / create paths
 # ==========================================================
+# Named parameter preset -> cfg/presets/<name>.csv (versioned in the repo). Sugar
+# for -ConfigCSV; the rest of the CSV plumbing then treats it as the config source.
+if ($ParamPreset) {
+    if ($ConfigCSV) { Write-Error "Pass either -ParamPreset or -ConfigCSV, not both." }
+    $presetDir = Join-Path (Split-Path $ScriptsDir -Parent) 'cfg\presets'
+    $presetCsv = Join-Path $presetDir ("{0}.csv" -f $ParamPreset)
+    if (-not (Test-Path $presetCsv)) {
+        $avail = @(Get-ChildItem $presetDir -Filter *.csv -ErrorAction SilentlyContinue | ForEach-Object { $_.BaseName })
+        $availStr = if ($avail.Count) { $avail -join ', ' } else { '(none saved yet -- use Save-Preset.ps1)' }
+        Write-Error ("Parameter preset '{0}' not found ({1}). Available presets: {2}" -f $ParamPreset, $presetCsv, $availStr)
+    }
+    $ConfigCSV = $presetCsv
+    Write-Host ("  Using parameter preset '{0}' -> {1}" -f $ParamPreset, $presetCsv) -ForegroundColor Cyan
+}
+
 if (-not (Test-Path $OutputRoot)) {
     New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
 }
