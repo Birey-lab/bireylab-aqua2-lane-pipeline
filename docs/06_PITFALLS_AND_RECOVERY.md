@@ -298,6 +298,37 @@ aws s3 sync "s3://<bucket>/CalciumImagingTIFFs/<dataset>/" "C:\Users\Administrat
 
 ---
 
+## 17. Headless Fiji: `--run` args must be an array, not a joined string
+
+**Symptom:** a Phase 0 LIF/TIFF extraction or the Movies step produces no output; the Fiji console shows `[WARNING] Ignoring invalid argument: --run` and no engine log is written.
+
+**Cause:** the current Fiji launcher (Jaunch) rejects `--run` when `Start-Process` is given a **single joined-string** `-ArgumentList`, e.g. `"--headless --run `"$engine`""`. The flag is dropped and the Jython engine never runs. (The earlier LIF validation used the `&` call operator, which passes each token separately and honored `--run`; the switch to `Start-Process` reintroduced the bug until it was caught on the instance.)
+
+**Fix (already in v0.10):** both launch sites pass `-ArgumentList` as a PowerShell **array** — one token per element — which quotes each correctly:
+
+```powershell
+# BROKEN: launcher drops --run
+Start-Process -FilePath $Fiji -ArgumentList "--headless --run `"$engine`"" -Wait ...
+# CORRECT:
+Start-Process -FilePath $Fiji -ArgumentList '--headless','--run',$engine -Wait ...
+```
+
+Also note: this launcher rejects `--console` too (`Ignoring invalid argument`), so it is intentionally omitted. If you write your own headless-Fiji helper, use the array form and verify the engine's own log reached its `TOTALS` line — Fiji can exit 0 even when the Jython script never ran or threw.
+
+---
+
+## 18. AQuA2 movies are multi-frame TIFF; ffmpeg reads only the first frame
+
+**Symptom:** the old movie step found nothing (it searched for `*.gif`, which AQuA2 never writes), or a direct `ffmpeg -i <stem>_AQuA2_Movie.tif out.mp4` produced a **1-frame** video from an ~900 MB source.
+
+**Cause:** the AQuA2 overlay movie is `<stem>_AQuA2_Movie.tif` — a **multi-page (multi-frame) TIFF stack**. ffmpeg's TIFF demuxer decodes only the **first page**, so it can't transcode these directly (verified: `ffprobe -count_frames` reports 1).
+
+**Fix (v0.10 Movies step):** convert in two hops — **Fiji** opens the stack and writes a lossless PNG **AVI**, then **ffmpeg** transcodes the AVI (which it reads fully) to H.264 MP4. Frame counts are preserved end-to-end (1200-in → 1200-out on the validated sample). Non-fatal: skips with a warning if Fiji or ffmpeg is missing. See [`04_PIPELINE_OPERATIONS.md`](04_PIPELINE_OPERATIONS.md) §E.7.
+
+**Related playback gotcha:** `-MovieLossless` encodes `yuv444p` (H.264 High 4:4:4), which **won't play in Windows Movies & TV / the built-in Media Player** — only VLC and similar. That's why the default is `-MovieCrf 17` with `yuv420p` (universally playable and visually indistinguishable for these overlays). Don't default to lossless just because "higher is better" — the movies would fail to open for most viewers.
+
+---
+
 ## General recovery principles
 
 When something goes wrong:

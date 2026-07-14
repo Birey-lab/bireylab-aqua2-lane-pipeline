@@ -1,9 +1,32 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.9.1 (2026-07-14).
+    Version 0.10.0-dev (unreleased; targeting v0.10.0). Base tag: v0.9.1.
 
 .DESCRIPTION
+    v0.10.0 (unreleased) changes: optional Phase 0 input prep + Movies + presets/GUI.
+    - Phase 0 (optional): start from LIF files, or trim/Hz-label existing TIFFs, before
+      Split. Headless Bio-Formats port of LIF_Extract_and_Trim.ijm
+      (fiji-macros/lif_extract_headless.py, config via LIF_EXTRACT_CONFIG env var).
+      Params: -LIFSource, -DetectOn, -SaveUntrimmed, -TrimMode/-TrimStartSec/
+      -TrimAmount/-TrimUnit, -HzLabel/-HzDecimals, -RatePolicy, -SkipTileScans,
+      -ExtractDryRun, -FijiExe. No -LIFSource and no -TrimMode = TIFF start as before.
+    - Movies (Consolidate): each <stem>_AQuA2_Movie.tif (multi-frame TIFF) -> MP4 in
+      for_upload\Movies\ via Fiji (stack -> lossless PNG AVI) -> ffmpeg (AVI -> H.264).
+      ffmpeg can't read multi-page TIFF directly (first page only). Params: -MovieCrf
+      (default 17), -MovieLossless, -MovieAviCompression (default PNG), -MovieFps
+      (default 20), -SkipMovies, -FfmpegExe. Optional + NON-FATAL (warns+skips if Fiji
+      or ffmpeg missing). Engine: fiji-macros/movies_to_avi.py.
+    - Consolidate input_TIFFs\ mirrors the original LIF subfolder tree (both UNTRIMMED
+      and TRIMMED) when a run extracted from LIF; flat for TIFF-start runs.
+    - Both headless Fiji launches pass ArgumentList as an ARRAY ('--headless','--run',
+      $engine): the single joined-string form made the launcher reject --run.
+    - Default -OutputRoot is now <Documents>\AQuA2_runs (was mandatory).
+    - Preset library (-ParamPreset <name> -> cfg/presets/<name>.csv; Save-Preset.ps1)
+      and a WinForms GUI launcher (New-Run.ps1). Params used are always written into
+      each run's output, so provenance travels with the data (no git needed).
+    See CHANGELOG.md.
+
     v0.9.1 changes: stall-detector correctness + splitter recursion, all found
     during the first full-scale real-data run (292 TIFFs).
     - Per-lane stall counters no longer false-fire. The DETECTION per-lane counter

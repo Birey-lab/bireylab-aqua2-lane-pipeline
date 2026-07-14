@@ -50,8 +50,14 @@ aws configure set default.s3.max_queue_size 10000
 cd C:\Users\Administrator\Documents\pipeline-repo
 git pull
 git describe --tags
-# Should show v0.9.0 or later
+# Should show v0.9.1 or later (v0.10.0 features are on main pre-tag: Phase 0
+# LIF/TIFF prep, Movies, presets + GUI launcher, dependency provisioner)
 ```
+
+> **Always `git pull` before a run.** The orchestrator and its Fiji engine scripts
+> (`fiji-macros/lif_extract_headless.py`, `fiji-macros/movies_to_avi.py`) ship in the
+> repo and are updated by `git pull` — no recompile needed for anything except the
+> MATLAB workers. If you skip the pull you may run against stale engine scripts.
 
 ### A.3 — Verify the stack
 
@@ -105,11 +111,12 @@ $totalGB = [math]::Round(((Get-ChildItem D:\incoming_tiffs -Filter *.tif | Measu
 
 | # | Phase | What it does | Output |
 |---|---|---|---|
-| 0 | **Auto-Size** (implicit) | Probes the largest input TIFF; computes safe lane count for the instance's RAM. Skipped if `-Lanes` is explicitly set. | (selects lane count) |
+| 0a | **Extract/Trim** (optional, v0.10) | Runs the LIF→TIFF extract/trim step (headless Fiji/Bio-Formats) when `-LIFSource` is given, or trims/Hz-labels an existing TIFF folder when `-InputTIFFs` is combined with a `-TrimMode`. Off when neither is set (start from TIFFs as before). See §E.6. | `<projectRoot>\extracted\...\{UNTRIMMED,TRIMMED}\*.tif` → repointed as the run's input |
+| 0b | **Auto-Size** (implicit) | Probes the largest input TIFF; computes safe lane count for the instance's RAM. Skipped if `-Lanes` is explicitly set. | (selects lane count) |
 | 1 | **Split** | Moves TIFFs from `-InputTIFFs` into `<projectRoot>\lanes\laneNN\` folders, size-balanced. Top level only by default; add `-RecurseInput` (v0.9.1+) to pull nested subfolders — requires unique filenames, else it hard-errors. | `<projectRoot>\lanes\laneNN\*.tif` |
 | 2 | **Detect** | Launches N `aqua_lane.exe` workers in parallel, each processes its lane's TIFFs. | `<projectRoot>\PreCFU\laneNN_results\<stem>_AQuA2.mat` (+ siblings) |
 | 3 | **CFU** | Launches M `cfu_lane.exe` workers (~0.75 × N by default) over detected `.mat` files via NTFS junctions. Bakes CFU fields into the original `.mat` AND writes a standalone `_res_cfu.mat`. | `<projectRoot>\POST\<stem>_AQuA2_res_cfu.mat` |
-| 4 | **Consolidate** | Builds `<projectRoot>\for_upload\` with `input_TIFFs/`, `PreCFU/` (per-stem), `PostCFU/` (flat). Uses **NTFS hardlinks** — zero extra disk cost. | `<projectRoot>\for_upload\` |
+| 4 | **Consolidate** | Builds `<projectRoot>\for_upload\` with `input_TIFFs/`, `PreCFU/` (per-stem), `PostCFU/` (flat), and `Movies/` (MP4 of each AQuA2 overlay — see §E.7). Uses **NTFS hardlinks** for TIFFs/mats — zero extra disk cost. | `<projectRoot>\for_upload\` |
 | 5 | **Upload** | `aws s3 sync` of `for_upload/` to the S3 prefix you specify. | (files in S3) |
 
 > **What `Run-Pipeline.ps1` replaced.** Pre-v0.7, you ran `Split-IntoLanes.ps1` → `Launch-Lanes-Exe.ps1` → `Build-CFU-Lanes.ps1` → `Launch-CFU-Lanes.ps1` → `Consolidate-Template.ps1` → `aws s3 sync` by hand, with manual stuck-lane recovery between phases. v0.7+ collapses all of this into one command with built-in resume, audit trails, and stall handling (and, from v0.8, a detection-completeness gate). The old scripts still exist in `powershell/` for the cases in [Appendix Z](#appendix-z-manual-workflow-pre-v07-or-debugging).
@@ -142,10 +149,14 @@ D:\runs\my_dataset_2026-06-15\          ← projectRoot
 │   ├── <stem1>_AQuA2_res_cfu.mat
 │   ├── <stem2>_AQuA2_res_cfu.mat
 │   └── ...
+├── extracted\                          ← phase 0 output (only when starting from LIF / trimming)
+│   └── <lif-subpath>\{UNTRIMMED,TRIMMED}\*.tif
 ├── for_upload\                         ← phase 4 output (hardlinks; PostCFU\ here is the consolidated copy of POST\)
-│   ├── input_TIFFs\                    ← flat
+│   ├── input_TIFFs\                    ← flat; OR mirrors the LIF subfolder tree (both UNTRIMMED+TRIMMED) on LIF runs
 │   ├── PreCFU\                         ← per-stem subfolders
-│   └── PostCFU\                        ← flat
+│   ├── PostCFU\                        ← flat
+│   ├── Movies\                         ← <stem>_AQuA2_Movie.mp4 (one per recording; needs Fiji+ffmpeg)
+│   └── <Project>_parameters_for_batch_USED.csv   ← the exact params this run used
 └── _logs\                              ← per-run audit
     └── run_20260615_140532\
         ├── pipeline.log
@@ -312,8 +323,104 @@ To process only specific files: move the un-wanted ones out of `D:\incoming_tiff
 | Resume after stall/crash | Same exact command as before. Resume guards handle it. |
 | Re-do CFU only | `-Split $false -Detect $false` |
 | Re-do Consolidate + Upload only | `-Split $false -Detect $false -CFU $false -Consolidate $true -Upload $true -S3Prefix "..."` |
+| Start from LIF files (Phase 0) | `-LIFSource "D:\lifs"` + trim flags (see §E.6) |
+| Trim existing TIFFs before detection | `-InputTIFFs "D:\tiffs" -TrimMode last -TrimAmount 60 -TrimUnit seconds` |
+| Faster run, skip movie generation | Add `-SkipMovies` |
+| Maximum-quality movies | Add `-MovieLossless` (or `-MovieCrf 12`) |
+| Reuse a saved parameter preset | `-ParamPreset C4` |
 | Dry-run preview | Add `-WhatIfMode` |
 | Skip the proceed prompt | Add `-Force` |
+
+---
+
+## E.6 — Start from LIF files, or trim TIFFs (Phase 0, optional)
+
+By default a run starts from TIFFs. Two optional pre-phases (v0.10) let the
+orchestrator prepare its own input first:
+
+**A) Extract from LIF.** Point `-LIFSource` at a folder (or file) of `.lif`
+microscope files. The orchestrator runs a headless Fiji / Bio-Formats port of
+`LIF_Extract_and_Trim.ijm` — decoding each series to TIFF, appending the *measured*
+frame rate to the filename (e.g. `_19.22Hz`), and optionally trimming — then feeds the
+result into Split→Detect→…:
+
+```powershell
+.\Run-Pipeline.ps1 `
+    -OutputRoot  "D:\runs" `
+    -ProjectName "hCO_d80_lif" `
+    -LIFSource   "D:\lifs" `
+    -TrimMode    last -TrimAmount 60 -TrimUnit seconds `
+    -SaveUntrimmed `          # keep BOTH untrimmed + trimmed sets
+    -DetectOn    trimmed `    # which set feeds detection: trimmed | untrimmed | auto
+    -FijiExe     "C:\Fiji\fiji-windows-x64.exe"
+```
+
+**B) Trim existing TIFFs.** Having TIFFs doesn't mean you don't want to trim them.
+Give `-InputTIFFs` a `-TrimMode` other than `none` and Phase 0 runs in TIFF mode
+(trim + Hz-label only; no LIF decode):
+
+```powershell
+.\Run-Pipeline.ps1 -OutputRoot "D:\runs" -ProjectName "trimmed_run" `
+    -InputTIFFs "D:\incoming_tiffs" -TrimMode middle -TrimAmount 1200 -TrimUnit frames
+```
+
+Key Phase 0 flags:
+
+| Flag | Meaning |
+|---|---|
+| `-LIFSource <path>` | Enables LIF extraction. Folder or single `.lif`. |
+| `-TrimMode none\|first\|middle\|last` | Trim window position. `none` (default) = no trim. |
+| `-TrimAmount` / `-TrimUnit seconds\|frames` | How much to keep/trim. |
+| `-TrimStartSec` | Offset for `first`-mode trims. |
+| `-SaveUntrimmed` | Emit both UNTRIMMED and TRIMMED sets (both land in `input_TIFFs/`). |
+| `-DetectOn trimmed\|untrimmed\|auto` | Which set detection runs on. |
+| `-HzLabel` / `-HzDecimals` | Control the measured-Hz filename suffix. |
+| `-RatePolicy warn\|drop` | What to do when a series' rate differs from the first seen. |
+| `-SkipTileScans` | Skip LIF TileScan/snapshot series. |
+| `-ExtractDryRun` | Plan only — logs the series/Hz/trim decisions, writes nothing. |
+| `-FijiExe <path>` | Fiji launcher (default `C:\Fiji\fiji-windows-x64.exe`). |
+
+> **Always `-ExtractDryRun` first on a new LIF set** to confirm the series list,
+> measured Hz, and trim window look right before committing to a full decode. The
+> extraction log is written to the run's audit folder.
+
+> Phase 0 needs **Fiji** installed (see the provisioner in
+> [`02_INFRASTRUCTURE_SETUP.md`](02_INFRASTRUCTURE_SETUP.md)). Unlike the movie step,
+> a Phase 0 you *asked for* is fatal if Fiji is missing — the run stops with the log
+> path rather than silently starting from no input.
+
+---
+
+## E.7 — Movies (MP4 overlays)
+
+Consolidate converts each recording's AQuA2 overlay movie —
+`<stem>_AQuA2_Movie.tif`, a **multi-frame TIFF** — into
+`for_upload\Movies\<stem>_AQuA2_Movie.mp4`. Because ffmpeg can only read the first
+page of a multi-page TIFF, the conversion is two hops: **Fiji** reads the stack and
+writes a lossless PNG AVI, then **ffmpeg** transcodes that AVI to H.264 MP4.
+
+This step is **optional and non-fatal**: if Fiji or ffmpeg is missing, or there are no
+`_Movie.tif` files, it logs a warning and skips — the run still succeeds.
+
+| Flag | Meaning |
+|---|---|
+| `-SkipMovies` | Don't make movies at all (fast). |
+| `-MovieCrf <0-51>` | H.264 quality, default **17** (visually transparent; lower = higher fidelity, bigger file). |
+| `-MovieLossless` | Mathematically lossless (qp 0, yuv444p). Largest; **won't play in Windows Movies & TV / built-in player — needs VLC.** |
+| `-MovieAviCompression PNG\|Uncompressed\|JPEG` | Fiji AVI codec (default PNG = lossless). |
+| `-MovieFps <n>` | MP4 frame rate (default 20). |
+| `-FfmpegExe <path>` | ffmpeg (default `ffmpeg` on PATH; auto-discovers `C:\ffmpeg\bin`). |
+
+> **Movies are the slow tail of Consolidate.** Fiji reads each ~900 MB `_Movie.tif`
+> sequentially and writes a large (~240 MB) lossless AVI before transcoding, per
+> recording. For a few-hundred-movie dataset this can add a long stretch after CFU.
+> Use `-SkipMovies` for a fast pass, then re-run `-Consolidate` later to make movies.
+> The default `-MovieCrf 17` is visually indistinguishable from lossless for these
+> overlays and keeps files ~3–4 MB each; reserve `-MovieLossless` for special cases.
+
+**Diagnostics** (in the run's audit folder): `movies_to_avi.log` (Fiji per-file
+[OK]/[FAIL]/[SKIP] + TOTALS), `movies_ffmpeg_errors.log` (per-failure ffmpeg stderr),
+and the RUN_SUMMARY movie counts.
 
 ---
 
