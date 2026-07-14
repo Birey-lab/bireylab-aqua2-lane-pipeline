@@ -165,6 +165,22 @@ function Find-Fiji {
     return $null
 }
 
+function Invoke-Native {
+    # Run a native command (winget, Rscript, ...) streaming its merged output to
+    # the log, WITHOUT letting its stderr trip $ErrorActionPreference='Stop' (a
+    # merged native stderr line raises a terminating NativeCommandError under Stop,
+    # and these tools write to stderr even on success). Returns the exit code.
+    param([string]$File, [string[]]$Arguments)
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $File @Arguments 2>&1 | ForEach-Object { Log "    $_" }
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $eap
+    }
+}
+
 function Download-File($url, $dest) {
     Log "  download: $url"
     Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
@@ -257,7 +273,7 @@ if (-not $SkipR) {
         try {
             if ($winget) {
                 Log "  installing R via winget (RProject.R)..."
-                & winget install --id RProject.R --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity 2>&1 | ForEach-Object { Log "    $_" }
+                Invoke-Native 'winget' @('install','--id','RProject.R','--source','winget','--accept-package-agreements','--accept-source-agreements','--silent','--disable-interactivity') | Out-Null
             } else {
                 # Direct CRAN installer (Inno Setup -> silent flags).
                 $page = Invoke-WebRequest 'https://cran.r-project.org/bin/windows/base/' -UseBasicParsing
@@ -301,7 +317,7 @@ if (-not $SkipRStudio) {
     } elseif ($winget) {
         try {
             Log "  installing RStudio via winget (Posit.RStudio)..."
-            & winget install --id Posit.RStudio --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity 2>&1 | ForEach-Object { Log "    $_" }
+            Invoke-Native 'winget' @('install','--id','Posit.RStudio','--source','winget','--accept-package-agreements','--accept-source-agreements','--silent','--disable-interactivity') | Out-Null
             if (Test-RStudio) { Ok "RStudio installed"; Record 'RStudio' 'installed' '' }
             else { Warn "RStudio install ran but the exe wasn't found where expected; verify manually."; Record 'RStudio' 'unverified' '' }
         } catch {
@@ -360,9 +376,9 @@ cat('All', length(all), 'packages present.\n')
             $rFile = Join-Path $tmp 'install_packages.R'
             Set-Content -Path $rFile -Value $rCode -Encoding ASCII
             Log "  running R package install (only missing packages; this can take a while)..."
-            & $rscript --vanilla $rFile 2>&1 | ForEach-Object { Log "    $_" }
-            if ($LASTEXITCODE -eq 0) { Ok "R packages present"; Record 'R packages' 'installed/present' "$($CranPkgs.Count)+$($BiocPkgs.Count)" }
-            else { Err "some R packages are still missing (see log above)"; Record 'R packages' 'INCOMPLETE' "exit $LASTEXITCODE" }
+            $rc = Invoke-Native $rscript @('--vanilla', $rFile)
+            if ($rc -eq 0) { Ok "R packages present"; Record 'R packages' 'installed/present' "$($CranPkgs.Count)+$($BiocPkgs.Count)" }
+            else { Err "some R packages are still missing (see log above)"; Record 'R packages' 'INCOMPLETE' "exit $rc" }
         } catch {
             Err "R package install failed: $($_.Exception.Message)"
             Record 'R packages' 'FAILED' $_.Exception.Message
