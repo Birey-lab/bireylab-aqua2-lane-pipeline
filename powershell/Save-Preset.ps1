@@ -62,5 +62,7 @@ foreach ($r in $rows) {
     }
 }
 Write-Host ""
-Write-Host "To share it with every instance, commit it:" -ForegroundColor Yellow
-Write-Host "  git add cfg/presets/$Name.csv && git commit -m `"preset: $Name`" && git push"
+Write-Host "Reuse it on this instance with:  -ParamPreset $Name" -ForegroundColor Cyan
+Write-Host "(The params you actually run with are also saved into each run's output"
+Write-Host " (for_upload -> S3), so provenance travels with the data -- no git needed."
+Write-Host " Committing this preset is optional: only to share it across instances.)" -ForegroundColor DarkGray

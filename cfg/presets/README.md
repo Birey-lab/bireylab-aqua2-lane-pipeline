@@ -19,17 +19,21 @@ table and, without `-Force`, asks you to confirm before detection.
 .\Save-Preset.ps1 -Name C4
 # snapshots C:\AQuA2\cfg\parameters_for_batch.csv -> cfg\presets\C4.csv
 ```
-Then commit it so it's shared:
-```powershell
-git add cfg/presets/C4.csv && git commit -m "preset: C4" && git push
-```
+
+## Where the durable record lives (NOT git)
+The authoritative record of "what parameters produced a run" is **not** a committed
+preset -- it's the CSV that `Run-Pipeline` copies into each run's output:
+`for_upload/<Project>_parameters_for_batch_USED.csv`, which is uploaded to S3 with
+the data. So provenance always travels with the results, no git required.
+
+Presets here are just a **convenience for selecting/reusing** a named set on an
+instance. Committing one (`git add/commit/push`) is *optional* -- only do it if you
+deliberately want that named set on OTHER instances or baked into the next AMI, and
+be careful running git from an instance (make sure it's on an up-to-date branch).
 
 ## Notes
-- A preset is the *whole* CSV (all rows, `File1` = the active column). Editing a
-  preset = editing that file.
-- `Run-Pipeline` archives the exact CSV used into each run's `_logs/run_*/`
-  (`parameters_for_batch_USED.csv`), so provenance travels with the data too.
+- A preset is the *whole* CSV (all rows, `File1` = the active column).
 - The GUI (`New-Run.ps1`) is the easiest way to make/adjust presets: load one into
   the editable parameter grid, change any value inline, and click **Save as
-  preset...** to write a new `cfg/presets/<name>.csv`. (It only rewrites the File1
-  values, preserving the CSV's exact format.) Then commit it to share.
+  preset...** to write a new `cfg/presets/<name>.csv` (it only rewrites the File1
+  values, preserving the CSV's exact format). Reuse it from the dropdown.
