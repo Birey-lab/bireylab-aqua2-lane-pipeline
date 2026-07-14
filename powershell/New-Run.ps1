@@ -214,7 +214,7 @@ Section 'Phases'
 $ckDetect  = Check 'Detection' $true
 $ckCFU     = Check 'CFU' $true
 $ckCons    = Check 'Consolidate' $true
-$ckMovies  = Check 'Make MP4 movies from overlays (needs ffmpeg)' $true
+$ckMovies  = Check 'Make MP4 movies from _Movie.tif overlays (needs Fiji + ffmpeg; slow)' $true
 
 # --- Buttons (fixed bottom bar, always visible above the scrolling panel) ---
 $bottom = New-Object System.Windows.Forms.Panel
