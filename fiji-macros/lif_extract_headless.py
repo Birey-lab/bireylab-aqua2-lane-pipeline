@@ -210,8 +210,16 @@ class Log:
         if self.f:
             self.f.write(msg + "\n")
             self.f.flush()
-        # Also echo to the ImageJ/console log for --console visibility.
-        IJ.log(msg)
+        # Echo to the console. IJ.log can behave oddly headless, so guard it and
+        # fall back to plain stdout (which Fiji's --console surfaces). The file log
+        # above is the source of truth the orchestrator inspects.
+        try:
+            IJ.log(msg)
+        except Exception:
+            try:
+                print(msg)
+            except Exception:
+                pass
 
     def close(self):
         if self.f:
@@ -283,11 +291,20 @@ def open_series(lif_path, series_index):
     opts.setColorMode(ImporterOptions.COLOR_MODE_DEFAULT)
     opts.setStackOrder(ImporterOptions.ORDER_XYCZT)
     opts.setVirtual(False)
-    opts.clearSeries()
+    # A fresh ImporterOptions has no series selected; turning one on makes the
+    # importer open ONLY that series. (We deliberately do NOT call clearSeries()
+    # -- it isn't part of the ImporterOptions API and would raise.)
     opts.setSeriesOn(series_index, True)
     imps = BF.openImagePlus(opts)
     if not imps or len(imps) == 0:
         return None
+    if len(imps) > 1:
+        # Shouldn't happen (only one series requested); keep the first, free rest.
+        for extra in imps[1:]:
+            try:
+                extra.close()
+            except Exception:
+                pass
     return imps[0]
 
 
@@ -339,7 +356,7 @@ def process_lif(lif_path, dst_parent, cfg_state, log):
             if peek_name is None:
                 peek_name = "series_%d" % (s + 1)
             size_t = meta.getPixelsSizeT(s)
-            peek_t = size_t.getValue() if size_t is not None else 0
+            peek_t = int(size_t.getValue()) if size_t is not None else 0
             clean_peek = strip_prefix(peek_name)
 
             if skip_tiles and ("TileScan_" in peek_name) and ("Merging" not in peek_name):
