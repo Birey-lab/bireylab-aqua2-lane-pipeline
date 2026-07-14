@@ -234,8 +234,13 @@ if (-not $SkipFiji) {
             # Current archive contains a top-level "Fiji\" folder (older builds:
             # "Fiji.app\"). Locate the launcher inside the extract, then move its
             # containing folder to $FijiDir -- robust to either layout/name.
-            $expandTo = Join-Path $tmp 'fiji_extract'
-            Log "  expanding archive (this is a few hundred MB)..."
+            # Extract to a SHORT root: Fiji's deep internal paths can exceed the
+            # 260-char MAX_PATH under the long %TEMP%\aqua2_setup_... prefix and make
+            # Expand-Archive fail partway.
+            $expandTo = Join-Path $env:SystemDrive '_fiji_extract'
+            if (Test-Path $expandTo) { Remove-Item $expandTo -Recurse -Force -ErrorAction SilentlyContinue }
+            New-Item -ItemType Directory -Path $expandTo -Force | Out-Null
+            Log "  expanding archive (~655 MB; this takes a few minutes)..."
             Expand-Archive -Path $zip -DestinationPath $expandTo -Force
             $foundExe = Get-ChildItem $expandTo -Recurse -File -Include $FijiLaunchers -ErrorAction SilentlyContinue | Select-Object -First 1
             if (-not $foundExe) { throw "no Fiji launcher ($($FijiLaunchers -join '/')) found in the archive" }
@@ -244,6 +249,7 @@ if (-not $SkipFiji) {
             if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
             if (Test-Path $FijiDir) { throw "$FijiDir already exists but has no Fiji launcher; move it aside and re-run" }
             Move-Item -Path $srcApp -Destination $FijiDir
+            Remove-Item $expandTo -Recurse -Force -ErrorAction SilentlyContinue   # tidy the short temp
             $fijiExe = Get-FijiExeInDir $FijiDir
             if ($fijiExe) { Ok "Fiji installed: $fijiExe"; Record 'Fiji' 'installed' $fijiExe }
             else { throw "post-install check failed: no launcher under $FijiDir" }
@@ -274,8 +280,12 @@ if (-not $SkipR) {
             if ($winget) {
                 Log "  installing R via winget (RProject.R)..."
                 Invoke-Native 'winget' @('install','--id','RProject.R','--source','winget','--accept-package-agreements','--accept-source-agreements','--silent','--disable-interactivity') | Out-Null
-            } else {
-                # Direct CRAN installer (Inno Setup -> silent flags).
+                $rscript = Get-RscriptPath
+            }
+            if (-not $rscript) {
+                # No winget (or winget didn't yield a working R) -> direct CRAN
+                # installer (Inno Setup -> silent flags).
+                if ($winget) { Warn "  winget didn't produce a working R; falling back to the CRAN installer." }
                 $page = Invoke-WebRequest 'https://cran.r-project.org/bin/windows/base/' -UseBasicParsing
                 $exeName = ([regex]'R-\d+\.\d+\.\d+-win\.exe').Match($page.Content).Value
                 if (-not $exeName) { throw "could not determine current R installer filename from CRAN" }
@@ -283,8 +293,8 @@ if (-not $SkipR) {
                 Download-File "https://cran.r-project.org/bin/windows/base/$exeName" $rexe
                 Log "  running R installer silently..."
                 Start-Process -FilePath $rexe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+                $rscript = Get-RscriptPath
             }
-            $rscript = Get-RscriptPath
             if ($rscript) { Ok "R installed: $rscript"; Record 'R' 'installed' $rscript }
             else { throw "post-install check failed: Rscript.exe not found" }
         } catch {
