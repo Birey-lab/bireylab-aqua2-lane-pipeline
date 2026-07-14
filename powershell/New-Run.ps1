@@ -129,7 +129,7 @@ $tbTiff    = TextFieldBrowse 'Input TIFFs folder' ''
 $ckRecurse = Check 'Recurse into TIFF subfolders' $false
 
 # --- Extraction ---
-Section 'Extraction (LIF only)'
+Section 'Trim / prep  (LIF always; TIFFs when a trim mode is chosen. Rate + TileScan = LIF only)'
 $ckUntrim  = Check 'Save a full UNTRIMMED copy of each series' $true
 $cbTrim    = Combo 'Trim window' @('none', 'first (beginning)', 'middle (centered)', 'last (final)') 'last (final)'
 $numAmt    = New-Object System.Windows.Forms.NumericUpDown; $numAmt.Maximum = 1000000; $numAmt.Value = 60; $numAmt.Size = '100,24'
@@ -236,22 +236,23 @@ function Build-Args {
     $a.ProjectName = $tbProject.Text.Trim()
     if ($tbOut.Text.Trim()) { $a.OutputRoot = $tbOut.Text.Trim() }
     $isLif = $cbSource.SelectedItem -like 'LIF*'
-    if ($isLif) {
-        $a.LIFSource     = $tbLif.Text.Trim()
+    $tm = ($cbTrim.SelectedItem -split ' ')[0]
+    if ($isLif) { $a.LIFSource = $tbLif.Text.Trim() } else { $a.InputTIFFs = $tbTiff.Text.Trim(); if ($ckRecurse.Checked) { $a.RecurseInput = $true } }
+    # Trim/prep settings apply to BOTH sources. For TIFFs, they only take effect
+    # (Phase 0 runs) when a trim mode is chosen; for LIF, extraction always runs.
+    if ($isLif -or $tm -ne 'none') {
         $a.SaveUntrimmed = [bool]$ckUntrim.Checked
-        $tm = ($cbTrim.SelectedItem -split ' ')[0]
         $a.TrimMode = $tm
         if ($tm -ne 'none') {
             $a.TrimUnit   = $cbUnit.SelectedItem
             $a.TrimAmount = [double]$numAmt.Value
             if ($tm -eq 'first') { $a.TrimStartSec = [double]$numStart.Value }
         }
-        $a.DetectOn      = $cbDetectOn.SelectedItem
-        $a.RatePolicy    = ($cbRate.SelectedItem -split ' ')[0]
-        $a.SkipTileScans = [bool]$ckTile.Checked
-    } else {
-        $a.InputTIFFs = $tbTiff.Text.Trim()
-        if ($ckRecurse.Checked) { $a.RecurseInput = $true }
+        $a.DetectOn = $cbDetectOn.SelectedItem
+        if ($isLif) {   # rate policy + TileScan filter are LIF-only
+            $a.RatePolicy    = ($cbRate.SelectedItem -split ' ')[0]
+            $a.SkipTileScans = [bool]$ckTile.Checked
+        }
     }
     if ($cbPreset.SelectedItem -like 'preset: *') { $a.ParamPreset = ($cbPreset.SelectedItem -replace '^preset: ', '') }
     $a.Detect      = [bool]$ckDetect.Checked

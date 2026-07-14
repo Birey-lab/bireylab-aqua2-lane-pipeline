@@ -310,12 +310,12 @@ param(
     [switch]$Force,
     [switch]$WhatIfMode,
 
-    # --- Phase 0: optional LIF extraction (v0.10) ---
-    # If -LIFSource is given, an Extract phase runs first: it drives Fiji headless
-    # (fiji-macros/lif_extract_headless.py) to turn .lif files into raw+trimmed
-    # TIFFs with measured-Hz filename labels, then feeds the chosen set into Split.
-    # Omit -LIFSource to start from TIFFs exactly as before. These mirror the
-    # interactive macro's options 1:1.
+    # --- Phase 0: optional extract/trim (v0.10) ---
+    # A Phase-0 step drives Fiji headless (fiji-macros/lif_extract_headless.py) to
+    # produce trimmed, Hz-labelled TIFFs, then feeds the chosen set into Split. It
+    # runs when EITHER -LIFSource is given (extract .lif series) OR -InputTIFFs is
+    # given with a -TrimMode other than 'none' (trim an existing TIFF folder).
+    # Plain TIFF start with -TrimMode none skips Phase 0 entirely, as before.
     [string]$LIFSource = '',
     [ValidateSet('trimmed','untrimmed','auto')][string]$DetectOn = 'auto',  # which extracted set feeds detection
     [bool]$SaveUntrimmed = $true,
@@ -980,10 +980,15 @@ foreach ($p in $paths.Values) {
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
 }
 
-# Phase 0 (LIF extraction) is enabled by providing -LIFSource. Its folders are
-# created only then, so non-extract projects stay clean.
-$doExtract = -not [string]::IsNullOrWhiteSpace($LIFSource)
-$doTrim    = ($TrimMode -ne 'none')
+# Phase 0 runs when there's prep work: extracting LIFs (-LIFSource), OR trimming a
+# folder of existing TIFFs (-InputTIFFs with a -TrimMode). Its folders are created
+# only then, so plain TIFF-start-no-trim projects stay clean.
+$doTrim = ($TrimMode -ne 'none')
+$extractMode = if (-not [string]::IsNullOrWhiteSpace($LIFSource)) { 'lif' }
+               elseif ((-not [string]::IsNullOrWhiteSpace($InputTIFFs)) -and $doTrim) { 'tiff' }
+               else { '' }
+$doExtract = [bool]$extractMode
+$extractSource = if ($extractMode -eq 'lif') { $LIFSource } elseif ($extractMode -eq 'tiff') { $InputTIFFs } else { '' }
 $resolvedDetectOn = ''          # set in pre-flight when extracting
 $engineScript = ''              # set in pre-flight when extracting
 if ($doExtract) {
@@ -1013,7 +1018,8 @@ Note ("Project name:      {0}" -f $ProjectName)
 Note ("Output base:       {0}" -f $OutputRoot)
 Note ("Project root:      {0}" -f $projectRoot)
 if ($doExtract) {
-    Note ("LIF source:        {0}  (Phase 0 Extract -> TIFFs -> Split)" -f $LIFSource)
+    $srcLabel = if ($extractMode -eq 'lif') { 'LIF source' } else { 'TIFF prep src' }
+    Note ("{0}:      {1}  (Phase 0 {2} -> TIFFs -> Split)" -f $srcLabel, $extractSource, $(if ($extractMode -eq 'lif') { 'extract' } else { 'trim' }))
 } else {
     Note ("Input TIFFs:       {0}" -f $InputTIFFs)
 }
@@ -1083,14 +1089,18 @@ if ($liveWorkers) {
     OK2 "no leftover workers running (clean slate)"
 }
 
-# --- 2.9. LIF extraction prerequisites (Phase 0, when -LIFSource given) ---
+# --- 2.9. Phase 0 prerequisites (LIF extraction, or trimming a TIFF folder) ---
 if ($doExtract) {
-    if (-not (Test-Path -LiteralPath $LIFSource)) {
-        Err2 ("LIF source folder not found: {0}" -f $LIFSource); $checksFailed++
+    if (-not (Test-Path -LiteralPath $extractSource)) {
+        Err2 ("{0} source folder not found: {1}" -f $extractMode.ToUpper(), $extractSource); $checksFailed++
+    } elseif ($extractMode -eq 'lif') {
+        $lifCount = @(Get-ChildItem -LiteralPath $extractSource -Recurse -File -Filter *.lif -ErrorAction SilentlyContinue).Count
+        if ($lifCount -eq 0) { Err2 ("No .lif files under {0}" -f $extractSource); $checksFailed++ }
+        else { OK2 ("LIF source: {0} .lif file(s) under {1}" -f $lifCount, $extractSource) }
     } else {
-        $lifCount = @(Get-ChildItem -LiteralPath $LIFSource -Recurse -File -Filter *.lif -ErrorAction SilentlyContinue).Count
-        if ($lifCount -eq 0) { Err2 ("No .lif files under {0}" -f $LIFSource); $checksFailed++ }
-        else { OK2 ("LIF source: {0} .lif file(s) under {1}" -f $lifCount, $LIFSource) }
+        $tifCount = @(Get-ChildItem -LiteralPath $extractSource -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -ieq '.tif' -or $_.Extension -ieq '.tiff' }).Count
+        if ($tifCount -eq 0) { Err2 ("No .tif/.tiff files at the top level of {0}" -f $extractSource); $checksFailed++ }
+        else { OK2 ("TIFF prep source: {0} .tif file(s) in {1}  (will trim: {2})" -f $tifCount, $extractSource, $TrimMode) }
     }
     # Resolve Fiji: if -FijiExe (default C:\Fiji.app\ImageJ-win64.exe) isn't there,
     # auto-discover an install in a non-default spot before giving up, so a Fiji
@@ -1399,20 +1409,22 @@ if (-not $Force) {
 }
 
 # ==========================================================
-# Phase 0: LIF extraction (optional) -- produces TIFFs, then sets $InputTIFFs
+# Phase 0: Extract/prep (optional) -- produces TIFFs, then sets $InputTIFFs
+# Mode 'lif' extracts .lif series; mode 'tiff' trims/labels an existing TIFF folder.
 # ==========================================================
 if ($doExtract) {
-    Phase 'Extract' "LIF extraction (headless Fiji)"
+    $phaseLabel = if ($extractMode -eq 'lif') { "LIF extraction (headless Fiji)" } else { "TIFF trim/prep (headless Fiji)" }
+    Phase 'Extract' $phaseLabel
     $extractStart = Get-Date
 
-    # Engine output is MIRRORED under the project's extracted/ folder so the LIF
-    # source tree is never modified. Config is a key=value file the engine reads
-    # via the LIF_EXTRACT_CONFIG env var (no PowerShell->Fiji arg quoting).
+    # Engine output goes under the project's extracted/ folder so the SOURCE (LIF
+    # tree or your input TIFFs) is never modified. Config is a key=value file the
+    # engine reads via the LIF_EXTRACT_CONFIG env var (no PowerShell->Fiji quoting).
     $extractLog = Join-Path $runAuditDir 'lif_extract.log'
     $cfgPath    = Join-Path $runAuditDir 'lif_extract.cfg'
     $cfgLines = @(
-        "mode=lif",
-        "input=$LIFSource",
+        "mode=$extractMode",
+        "input=$extractSource",
         "output=$($paths['extracted'])",
         "output_mode=mirror",
         "save_untrimmed=$($SaveUntrimmed.ToString().ToLower())",
