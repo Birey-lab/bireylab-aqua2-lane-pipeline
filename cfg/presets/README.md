@@ -29,5 +29,7 @@ git add cfg/presets/C4.csv && git commit -m "preset: C4" && git push
   preset = editing that file.
 - `Run-Pipeline` archives the exact CSV used into each run's `_logs/run_*/`
   (`parameters_for_batch_USED.csv`), so provenance travels with the data too.
-- The interactive wizard (`New-Run.ps1`) lets you pick a preset from a menu and
-  shows its values before you commit to a run.
+- The GUI (`New-Run.ps1`) is the easiest way to make/adjust presets: load one into
+  the editable parameter grid, change any value inline, and click **Save as
+  preset...** to write a new `cfg/presets/<name>.csv`. (It only rewrites the File1
+  values, preserving the CSV's exact format.) Then commit it to share.
