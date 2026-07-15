@@ -64,6 +64,13 @@ param(
     # doesn't scroll a line every few seconds. A new peak always prints immediately.
     [int]$HeartbeatSec = 120,
 
+    # Safety net: if the probe runs longer than this, kill the probe worker and
+    # proceed with whatever we measured, so a STUCK probe file can't hang the whole
+    # run. Must exceed a normal single-file detection (these 5x recordings take
+    # ~30 min), so the default is generous -- a genuine hang is bounded, not
+    # infinite. 0 disables the timeout. Tip: pass -Lanes to skip the probe entirely.
+    [int]$ProbeTimeoutSec = 3600,
+
     [int]$MaxLanes = 32
 )
 
@@ -148,6 +155,7 @@ $warmupSkipped = 0
 $lastPeakPrinted = 0
 $lastHeartbeat = $startTime
 $warmupNoted = $false
+$timedOut = $false
 
 while (-not $proc.HasExited) {
     Start-Sleep -Seconds $SampleSec
@@ -156,6 +164,15 @@ while (-not $proc.HasExited) {
         $curGB = [math]::Round($p.WorkingSet64 / 1GB, 2)
         $now = Get-Date
         $elapsedSec = ($now - $startTime).TotalSeconds
+
+        # Timeout guard: a stuck probe file must not hang the run. Kill the worker
+        # and proceed with whatever peak we captured (or CPU-only if none).
+        if ($ProbeTimeoutSec -gt 0 -and $elapsedSec -ge $ProbeTimeoutSec) {
+            $timedOut = $true
+            Write-Warning ("Probe exceeded -ProbeTimeoutSec ({0}s / {1:N0} min) -- killing the probe worker and proceeding. The probe file may be stuck; the real run's per-file guard + stall detector still protect detection." -f $ProbeTimeoutSec, ($ProbeTimeoutSec/60))
+            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+            break
+        }
 
         if ($elapsedSec -lt $WarmupSec) {
             $warmupSkipped++
@@ -186,6 +203,12 @@ while (-not $proc.HasExited) {
 
 $elapsed = (Get-Date) - $startTime
 $elapsedMin = [math]::Round($elapsed.TotalMinutes, 2)
+
+if ($timedOut) {
+    Write-Host ""
+    Write-Warning ("Probe was KILLED by the {0}s timeout, so the RAM peak below may UNDER-estimate true demand." -f $ProbeTimeoutSec)
+    Write-Warning "Treat the recommended lane count as an upper bound. If the file was merely slow (not stuck), re-probe with a larger -ProbeTimeoutSec, or just pass -Lanes to skip the probe."
+}
 
 # ---------- Compute recommendation ----------
 if ($peakRAM_GB -le 0) {
