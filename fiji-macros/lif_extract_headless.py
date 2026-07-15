@@ -211,12 +211,27 @@ def compute_trim_frames(total_frames, fi, trim_mode, trim_start_sec, trim_amount
 # ----------------------------------------------------------------------------
 class Log:
     def __init__(self, path):
+        self.path = path
         self.f = open(path, "w") if path else None
 
     def __call__(self, msg):
         if self.f:
-            self.f.write(msg + "\n")
-            self.f.flush()
+            # A logging failure must NEVER abort a multi-hour extraction. If the
+            # handle was closed out from under us (e.g. the run was interrupted and
+            # the JVM began tearing down file handles mid-write), try ONE reopen in
+            # append mode; if that also fails, drop file logging and keep going via
+            # the console echo below. The orchestrator's success check tolerates a
+            # truncated log because it also inspects Fiji's exit + stderr.
+            try:
+                self.f.write(msg + "\n")
+                self.f.flush()
+            except (ValueError, IOError):
+                try:
+                    self.f = open(self.path, "a")
+                    self.f.write(msg + "\n")
+                    self.f.flush()
+                except Exception:
+                    self.f = None
         # Echo to the console. IJ.log can behave oddly headless, so guard it and
         # fall back to plain stdout (which Fiji's --console surfaces). The file log
         # above is the source of truth the orchestrator inspects.
