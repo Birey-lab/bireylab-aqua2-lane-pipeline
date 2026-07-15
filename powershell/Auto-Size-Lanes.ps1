@@ -58,6 +58,12 @@ param(
 
     [int]$WarmupSec = 30,
 
+    # How often to PRINT a "still running" heartbeat while nothing changes. RAM is
+    # still sampled every $SampleSec for an accurate peak; only the console output
+    # is throttled so a long probe (detection on one recording can take 30+ min)
+    # doesn't scroll a line every few seconds. A new peak always prints immediately.
+    [int]$HeartbeatSec = 120,
+
     [int]$MaxLanes = 32
 )
 
@@ -139,21 +145,39 @@ $startTime = Get-Date
 $peakRAM_GB = 0
 $samples = 0
 $warmupSkipped = 0
+$lastPeakPrinted = 0
+$lastHeartbeat = $startTime
+$warmupNoted = $false
 
 while (-not $proc.HasExited) {
     Start-Sleep -Seconds $SampleSec
     try {
         $p = Get-Process -Id $proc.Id -ErrorAction Stop
         $curGB = [math]::Round($p.WorkingSet64 / 1GB, 2)
-        $elapsedSec = ((Get-Date) - $startTime).TotalSeconds
+        $now = Get-Date
+        $elapsedSec = ($now - $startTime).TotalSeconds
 
         if ($elapsedSec -lt $WarmupSec) {
             $warmupSkipped++
-            Write-Host ("  [warmup t={0,4:N0}s] RAM = {1:N2} GB (ignored)" -f $elapsedSec, $curGB)
+            if (-not $warmupNoted) {
+                Write-Host ("  [warmup] ignoring the first {0}s of RAM samples (MCR startup)..." -f $WarmupSec)
+                $warmupNoted = $true
+            }
         } else {
             $samples++
-            if ($curGB -gt $peakRAM_GB) { $peakRAM_GB = $curGB }
-            Write-Host ("  [steady t={0,4:N0}s] RAM = {1:N2} GB   peak = {2:N2} GB" -f $elapsedSec, $curGB, $peakRAM_GB)
+            $newPeak = $false
+            if ($curGB -gt $peakRAM_GB) { $peakRAM_GB = $curGB; $newPeak = $true }
+            # Print only on a MEANINGFUL new peak (>=0.05 GB above last printed) or a
+            # slow heartbeat -- not every sample. Sampling stays frequent for accuracy;
+            # only the output is throttled so long probes don't spam the console.
+            $peakGrew = $newPeak -and (($peakRAM_GB - $lastPeakPrinted) -ge 0.05)
+            $heartbeat = ($now - $lastHeartbeat).TotalSeconds -ge $HeartbeatSec
+            if ($peakGrew -or $heartbeat) {
+                $tag = if ($peakGrew) { 'new peak' } else { 'running ' }
+                Write-Host ("  [t={0,5:N0}s] {1} | RAM = {2:N2} GB   peak = {3:N2} GB" -f $elapsedSec, $tag, $curGB, $peakRAM_GB)
+                $lastPeakPrinted = $peakRAM_GB
+                $lastHeartbeat = $now
+            }
         }
     } catch {
         # Process may have exited between HasExited check and Get-Process
