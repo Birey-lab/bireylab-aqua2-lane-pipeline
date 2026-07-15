@@ -354,6 +354,10 @@ param(
     [ValidateSet('warn','drop')][string]$RatePolicy = 'warn',
     [bool]$SkipTileScans = $true,
     [switch]$ExtractDryRun,
+    # Cap Phase 0 extraction to the first N series per LIF (0 = all). For fast
+    # end-to-end smoke tests: extract a handful, run the full chain, then re-run
+    # with 0 for the real thing. Only affects extraction, not detection.
+    [int]$ExtractMaxSeries = 0,
     # Current Fiji installs as C:\Fiji\fiji-windows-x64.exe; older ones use
     # C:\Fiji.app\ImageJ-win64.exe. Pre-flight auto-discovers either if this
     # default isn't present.
@@ -1181,6 +1185,7 @@ if ($doExtract) {
     if ($resolvedDetectOn -eq 'trimmed'  -and -not $doTrim)        { Err2 "-DetectOn trimmed but -TrimMode is none (no trimmed set would exist)."; $checksFailed++ }
     if ($resolvedDetectOn -eq 'untrimmed' -and -not $SaveUntrimmed) { Err2 "-DetectOn untrimmed but -SaveUntrimmed is `$false (no untrimmed set would exist)."; $checksFailed++ }
     if ($checksFailed -eq 0) { OK2 ("extract plan: save_untrimmed={0}, trim={1}, detect-on={2}" -f $SaveUntrimmed, $TrimMode, $resolvedDetectOn) }
+    if ($ExtractMaxSeries -gt 0) { Warn2 ("extract SMOKE-TEST cap: first {0} series per LIF only (-ExtractMaxSeries). Re-run with 0 for all." -f $ExtractMaxSeries) }
 }
 
 # --- 3. Input TIFFs ---
@@ -1472,6 +1477,7 @@ if ($doExtract) {
         "rate_policy=$RatePolicy",
         "skip_tilescans=$($SkipTileScans.ToString().ToLower())",
         "dry_run=$($ExtractDryRun.IsPresent.ToString().ToLower())",
+        "max_series=$ExtractMaxSeries",
         "log=$extractLog"
     )
     Set-Content -Path $cfgPath -Value $cfgLines -Encoding ASCII
