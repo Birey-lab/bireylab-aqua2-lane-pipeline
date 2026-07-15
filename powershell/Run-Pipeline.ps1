@@ -1611,7 +1611,7 @@ if (($Split -or $Detect) -and $Lanes -le 0) {
         $recFile = Join-Path $env:TEMP "autosize_recommendation.txt"
         if (Test-Path $recFile) { Remove-Item $recFile -Force }
 
-        Note "Profiling the largest TIFF (5-15 min)..."
+        Note "Profiling the largest TIFF (runs a full single-file detection; can take 30+ min on large/slow recordings, and auto-times-out if the probe file hangs). Pass -Lanes to skip this."
         & $autoSizer -ProbeFolder $InputTIFFs
 
         if (Test-Path $recFile) {
