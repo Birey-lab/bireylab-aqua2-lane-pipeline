@@ -213,6 +213,28 @@ cfuNumThr = 3
 
 Changing these requires editing `C:\AQuA2\cfu_lane.m`, recompiling `cfu_lane.exe`, **and** updating `cfu_parameters_BAKED.txt`. This is a maintainer task — see the comment block at the top of `cfu_parameters_BAKED.txt`.
 
+### C.3 — How your parameters reach the worker (and the resume caveat)
+
+Traced from source, so you can trust what's applied:
+
+1. The CSV you choose (GUI grid / `-ParamPreset` / `-ConfigCSV`, else the default) is **copied over `C:\AQuA2\cfg\parameters_for_batch.csv` at detection start** ([Run-Pipeline.ps1:1668-1677](../powershell/Run-Pipeline.ps1)), backing up any existing one.
+2. The worker is launched as `aqua_lane.exe "<lane>" "<results>"` with **no config argument** ([Launch-Lanes-Exe.ps1:60](../powershell/Launch-Lanes-Exe.ps1)), so it reads its default path — exactly the file just staged.
+3. Per file, `opts = util.parseParam_for_batch(1, [], cfgFile)` ([aqua_lane.m:81](../matlab/aqua_lane.m)) reads the **File1 column, fresh from disk**. There is **no per-recording parameters file** — only the image data comes from the lane folder. So the params you set apply to every file the run processes.
+4. The exact CSV used is snapshotted **before** detection to the run's `parameters_for_batch_USED.csv` (audit dir) and into `for_upload\<Project>_parameters_for_batch_USED.csv`.
+
+> **The one real gotcha — changed params don't re-apply to already-done files.**
+> The worker bakes `opts` into each `<stem>_AQuA2.mat` and its **resume guard skips any file that already has a `.mat`** ([aqua_lane.m:72-78](../matlab/aqua_lane.m)). So if you change parameters and **re-run detection into the same project**, completed files are skipped and keep their **old** params; only not-yet-done files get the new ones. To re-apply new params to a finished file, delete its `_results` folder (or `.mat`) and re-run detection, or use a fresh `-ProjectName`. Fresh runs are never affected. (This does **not** touch the "run without CFU, add CFU later" resume — that re-runs CFU/Consolidate, not detection.) See [Pitfalls §19](06_PITFALLS_AND_RECOVERY.md#19-changed-detection-parameters-dont-re-apply-to-already-processed-files).
+
+**Double-check after a test run** — read the params baked into a real output and diff them against the CSV the run used:
+
+```powershell
+Rscript C:\Users\Administrator\Documents\pipeline-repo\tools\verify_applied_params.R `
+    "<project>\PreCFU\lane01_results\<stem>_results\<stem>_AQuA2.mat" `
+    "<project>\_logs\<run>\parameters_for_batch_USED.csv"
+```
+
+It prints the baked `res.opts` and an `OK`/`MISMATCH` line per parameter (uses R's `hdf5r` — the `.mat` is HDF5/v7.3). A `PASS` confirms the parameters were actually consumed; a `FAIL` on `frameRate`/`maxSize`/`minSize`/`spatialRes` almost always means that `.mat` is from an earlier run (resume-skipped), i.e. the caveat above.
+
 ---
 
 ## D. Dry-run preview (always do this first)

@@ -329,6 +329,28 @@ Also note: this launcher rejects `--console` too (`Ignoring invalid argument`), 
 
 ---
 
+## 19. Changed detection parameters don't re-apply to already-processed files
+
+**Symptom:** you edit `parameters_for_batch.csv` (e.g. bump `maxSize`), re-run the pipeline on the same `-ProjectName`, and the outputs still reflect the **old** parameters for files that were processed before.
+
+**Cause — this is by design, and it's the "AQuA2 references the original" behavior to be aware of.** The compiled worker reads the File1 column of the CSV *fresh from disk, per file* ([aqua_lane.m:81](../matlab/aqua_lane.m)) and **bakes the resulting `opts` struct into `<stem>_AQuA2.mat`** ([aqua_lane.m:390](../matlab/aqua_lane.m)). Its **resume guard skips any file that already has a `.mat`** ([aqua_lane.m:72-78](../matlab/aqua_lane.m)) — the whole point being cheap restarts. So on a re-run, completed files are skipped and retain the parameters baked in when they were first processed; only not-yet-done files pick up the new CSV.
+
+**What is *not* affected:** a genuinely fresh run (new `-ProjectName` or empty output) always applies the current CSV to every file. And the "run without CFU, then add CFU later" resume re-runs **CFU/Consolidate**, not detection — so detection parameters aren't re-evaluated there and nothing is stale.
+
+**Fix — to force new detection parameters onto an already-done file, pick one:**
+- Delete that recording's `_results` folder (or its `_AQuA2.mat`) under `PreCFU\laneNN_results\`, then re-run with `-Detect $true -Split $false`. The resume guard no longer sees a `.mat`, so it reprocesses with the new params.
+- Or run a fresh project with a different `-ProjectName` (cleanest when re-parameterizing the whole dataset).
+
+**Verify what was actually applied** — read the baked `res.opts` back out of a finished `.mat` and diff it against the CSV the run used:
+
+```powershell
+Rscript <repo>\tools\verify_applied_params.R "<...>_AQuA2.mat" "<run>\parameters_for_batch_USED.csv"
+```
+
+`PASS` = the CSV's params are what's baked in. `FAIL` on `frameRate`/`maxSize`/`minSize`/`spatialRes` = that `.mat` predates your CSV change (resume-skipped). The script uses R's `hdf5r` (the `.mat` is HDF5/v7.3); if `hdf5r` chokes on a file, the same fields read from Python: `h5py.File(mat)['res/opts/maxSize'][()]`.
+
+---
+
 ## General recovery principles
 
 When something goes wrong:
