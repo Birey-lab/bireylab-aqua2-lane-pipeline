@@ -35,6 +35,42 @@ $items = $items | Sort-Object Dir -Unique:$false | Group-Object Dir | ForEach-Ob
 }
 "Unique result-folders: $($items.Count)"
 
+# 1b) GUARD: refuse OVERLAPPING result-folders. If one target folder is an ancestor
+# of another (e.g. a stray flat laneNN_results\<stem>_AQuA2.mat sitting ABOVE nested
+# <stem>_results from a different/mixed run), junctioning both exposes the same
+# recordings through two CFU lanes -> two cfu_lane workers write the same .mat ->
+# ".mat.tmp is currently in use / appears to be corrupt". That is the mixed/residue
+# signature; fail loudly instead of silently double-processing and corrupting data.
+$dirSet = @{}
+foreach ($it in $items) { $dirSet[$it.Dir.TrimEnd('\').ToLowerInvariant()] = $it.Dir }
+$overlaps = New-Object System.Collections.ArrayList
+foreach ($it in $items) {
+    $p = Split-Path ($it.Dir.TrimEnd('\')) -Parent
+    while ($p) {
+        if ($dirSet.ContainsKey($p.ToLowerInvariant())) {
+            [void]$overlaps.Add([pscustomobject]@{ Parent = $dirSet[$p.ToLowerInvariant()]; Child = $it.Dir })
+            break
+        }
+        $up = Split-Path $p -Parent
+        if ([string]::IsNullOrEmpty($up) -or $up -eq $p) { break }
+        $p = $up
+    }
+}
+if ($overlaps.Count -gt 0) {
+    Write-Host ""
+    Write-Host "ERROR: $($overlaps.Count) overlapping result-folder(s) -- one result-folder contains" -ForegroundColor Red
+    Write-Host "another. This is the signature of a MIXED/contaminated PreCFU tree (usually a stray" -ForegroundColor Red
+    Write-Host "flat *_AQuA2.mat from a previous run sitting above nested <stem>_results). Junctioning" -ForegroundColor Red
+    Write-Host "both would double-process recordings and corrupt output. Remove the stray flat .mat(s)" -ForegroundColor Red
+    Write-Host "or use a clean project, then retry." -ForegroundColor Red
+    $overlaps | Select-Object -First 15 | ForEach-Object {
+        Write-Host ("  parent: {0}" -f $_.Parent) -ForegroundColor Yellow
+        Write-Host ("   child: {0}" -f $_.Child) -ForegroundColor Yellow
+    }
+    if ($overlaps.Count -gt 15) { Write-Host ("  ... and $($overlaps.Count - 15) more") -ForegroundColor Yellow }
+    throw "Build-CFU-Lanes: overlapping result-folders detected; refusing to build (would corrupt data)."
+}
+
 # 2) greedy size-balanced bin-packing into $Lanes bins
 $bins = @{}; $load = @{}
 1..$Lanes | ForEach-Object { $bins[$_] = New-Object System.Collections.ArrayList; $load[$_] = [double]0 }
