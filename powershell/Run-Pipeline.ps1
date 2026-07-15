@@ -2764,7 +2764,9 @@ Note ("Project root:       {0}" -f $projectRoot)
 Note ("  Detection (.mat): {0} files" -f $counts['detection_ok'])
 Note ("  CFU (_res_cfu):   {0} files" -f $counts['cfu_ok'])
 if ($Consolidate -and (Test-Path $paths['for_upload'])) {
-    $upTiffCount = (Get-ChildItem (Join-Path $paths['for_upload'] 'input_TIFFs') -File -ErrorAction SilentlyContinue).Count
+    # -Recurse: input_TIFFs mirrors the LIF tree (nested <donor>\{UNTRIMMED,TRIMMED}\)
+    # on LIF runs, so a top-level-only count reads 0 even when TIFFs are present.
+    $upTiffCount = (Get-ChildItem (Join-Path $paths['for_upload'] 'input_TIFFs') -Recurse -File -Include *.tif,*.tiff -ErrorAction SilentlyContinue).Count
     $upPostCount = (Get-ChildItem (Join-Path $paths['for_upload'] 'PostCFU') -File -Filter "*_res_cfu.mat" -ErrorAction SilentlyContinue).Count
     Note ("  for_upload:       {0} TIFFs, {1} PostCFU .mat (ready for S3)" -f $upTiffCount, $upPostCount)
 }
