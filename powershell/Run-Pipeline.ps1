@@ -331,6 +331,10 @@ param(
     [int]$PollEverySec = 60,
     [int]$DetailEverySec = 300,
     [switch]$Force,
+    # Override the safety check that refuses a -Split run into a project that already
+    # has detection outputs (the residue-contamination trap). Only for advanced,
+    # deliberate re-splits; a normal resume uses -Split $false and isn't affected.
+    [switch]$AllowNonEmptyProject,
     [switch]$WhatIfMode,
 
     # --- Phase 0: optional extract/trim (v0.10) ---
@@ -1126,6 +1130,30 @@ if ($liveWorkers) {
     $checksFailed++
 } else {
     OK2 "no leftover workers running (clean slate)"
+}
+
+# --- 2.6. Refuse a fresh Split run into a project that already has outputs ---
+# The residue-contamination trap: re-running Split into a populated project mixes
+# this run's data with a previous run's (e.g. smoke UNTRIMMED + full TRIMMED) AND
+# leaves flat + nested _AQuA2.mat in the same tree, which makes Build-CFU-Lanes
+# create overlapping junctions -> two workers corrupt the same .mat. Resume runs use
+# -Split $false and are unaffected. Override (advanced) with -AllowNonEmptyProject.
+if ($Split -and -not $AllowNonEmptyProject) {
+    $existMats = @(Get-ChildItem $paths['PreCFU'] -Recurse -Filter *_AQuA2.mat -File -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -notlike '*_res_cfu.mat' }).Count
+    $existLaneTifs = @(Get-ChildItem $paths['lanes'] -Recurse -Include *.tif,*.tiff -File -ErrorAction SilentlyContinue).Count
+    if ($existMats -gt 0 -or $existLaneTifs -gt 0) {
+        Err2 ("project '{0}' already contains outputs: {1} _AQuA2.mat, {2} lane TIFF(s)." -f $ProjectName, $existMats, $existLaneTifs)
+        Err2 "A -Split run here would MIX this run's data with the previous run's (contamination), and"
+        Err2 "leave flat + nested .mat in one tree -> overlapping CFU junctions -> corrupted output."
+        Err2 "Fix: use a fresh -ProjectName, or delete the project:"
+        Err2 ("      Remove-Item '{0}' -Recurse -Force" -f $projectRoot)
+        Err2 "For a resume (add CFU/consolidate to an existing run), pass -Split `$false instead."
+        Err2 "(Advanced/deliberate re-split only: -AllowNonEmptyProject.)"
+        $checksFailed++
+    } else {
+        OK2 "project output dir is clean (no prior detection outputs)"
+    }
 }
 
 # --- 2.9. Phase 0 prerequisites (LIF extraction, or trimming a TIFF folder) ---
