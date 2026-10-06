@@ -4,7 +4,7 @@ Parallel detection + CFU clustering for calcium-imaging data using AQuA2, design
 
 The pipeline takes raw multi-frame TIFFs (calcium fluorescence movies), splits them into `N` parallel "lanes" (one MATLAB worker per lane), runs AQuA2 event detection and CFU clustering, and produces per-recording `.mat` outputs ready for downstream R analysis.
 
-**Current release: orchestrator [v0.9.1](https://github.com/Birey-lab/bireylab-aqua2-lane-pipeline/releases/tag/v0.9.1)** (July 2026). The orchestrator script `powershell/Run-Pipeline.ps1` drives the entire pipeline end-to-end (Split → Detect → CFU → Consolidate → Upload to S3) with per-run audit trails, three-stage stall detection, resume guards, and a detection-completeness gate. v0.9.1 fixes false-positive stall alarms and adds opt-in recursive input splitting (see below). See [`CHANGELOG.md`](CHANGELOG.md) for the version history.
+**Current release: orchestrator [v0.10.0](https://github.com/Birey-lab/bireylab-aqua2-lane-pipeline/releases/tag/v0.10.0)** (2026). The orchestrator script `powershell/Run-Pipeline.ps1` drives the entire pipeline end-to-end (optional Phase 0 LIF extraction / trim → Split → Detect → CFU → Consolidate incl. MP4 movies → Upload to S3) with per-run audit trails, three-stage stall detection, resume guards, a detection-completeness gate, and contamination guards. v0.10.0 adds optional Phase 0 LIF→TIFF extraction + trimming, MP4 movie generation, a named-preset library + GUI launcher, a dependency provisioner, and guards against mixed/contaminated re-runs. See [`CHANGELOG.md`](CHANGELOG.md) for the version history.
 
 **Key design decisions:**
 
