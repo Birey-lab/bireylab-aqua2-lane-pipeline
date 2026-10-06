@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
     End-to-end AQuA2 pipeline orchestrator with explicit per-phase toggles.
-    Version 0.10.0-dev (unreleased; targeting v0.10.0). Base tag: v0.9.1.
+    Version 0.10.0 (2026-10-06).
 
 .DESCRIPTION
-    v0.10.0 (unreleased) changes: optional Phase 0 input prep + Movies + presets/GUI.
+    v0.10.0 changes: optional Phase 0 input prep + Movies + presets/GUI.
     - Phase 0 (optional): start from LIF files, or trim/Hz-label existing TIFFs, before
       Split. Headless Bio-Formats port of LIF_Extract_and_Trim.ijm
       (fiji-macros/lif_extract_headless.py, config via LIF_EXTRACT_CONFIG env var).

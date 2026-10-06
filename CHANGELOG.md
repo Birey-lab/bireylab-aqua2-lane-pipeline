@@ -11,13 +11,14 @@ parameters).
 
 ---
 
-## Unreleased — targeting v0.10.0
+## v0.10.0 — 2026-10-06
 
 Optional **Phase 0 input prep** (start from LIF, or trim TIFFs) folded into the
 orchestrator, plus **MP4 movie generation** in Consolidate, a named-**preset**
-library with a **GUI launcher**, and a dependency **provisioner**. Merged to
-`main` (available via `git pull`); **not tagged yet** — holding the tag until a
-full instance run exercises Phase 0 extraction and the movie step end-to-end.
+library with a **GUI launcher**, and a dependency **provisioner**. Work merged
+2026-07; **validated end-to-end on a 265-recording real LIF run** (2 donors,
+CACNA1A-isogenic C/G/L, CAMK2A+DLX): Phase 0 extract → trim → detect → CFU →
+Consolidate → Movies, 0 failures, then tagged.
 
 - **Phase 0 — start from LIF files, or trim existing TIFFs (optional).**
   `Run-Pipeline.ps1` can now run the LIF→TIFF extract/trim step itself (a headless
