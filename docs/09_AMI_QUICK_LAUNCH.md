@@ -33,7 +33,18 @@ You're a lab member or collaborator who:
 
 ### A.2 — What the AMI ships with
 
-The AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, built 2026-06-15) is a Windows Server 2025 image with everything pre-installed and on PATH. Unlike the earlier `v2-Clean` image, v3 was sysprepped so **each instance launched from it gets its own unique Administrator password** (retrieve it via EC2 console → Connect → RDP client → Get password, decrypt with your key pair). Do not use `v2-Clean`: every instance from it shared one baked-in password.
+The AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, **us-east-1**, built 2026-06-15) is a Windows Server 2025 image with everything pre-installed and on PATH. v3 was sysprepped so **each instance launched from it gets its own unique Administrator password** (retrieve it via EC2 console → Connect → RDP client → Get password, decrypt with your key pair).
+
+> ⚠️ **Every custom AMI MUST be sysprepped before imaging** (EC2Launch → *sysprep + shutdown* → Create Image), or new instances **won't give you a retrievable password** — "Get Windows Password" comes back empty and the instance silently keeps the *source* instance's baked-in Administrator password. The old `v2-Clean` image had this problem (one shared password), and **`Windows2025-AQuA2-Pipeline-v4` (`ami-05fc44a8cec6f108b`, 2026-07-22) regressed to it** — v4 was **not** sysprepped. Prefer a sysprepped image; if you must use v4, see **"Locked out of a custom AMI"** below. Note AMIs are region-specific, so an image built in one region must be copied to launch in another.
+
+> **AMI vs. code:** the AMI only carries the installed **tools** (Fiji, ffmpeg, R, …). The pipeline **code is `git pull`-updated** (§B.5), so any working instance → `git pull` (or `git checkout v0.10.0`) is fully current regardless of AMI age. v3 predates v0.10.0 and may lack ffmpeg — run `setup\Install-Dependencies.ps1` after pulling.
+
+#### Locked out of a custom AMI (no retrievable password)
+
+If a custom AMI wasn't sysprepped, "Get Windows Password" returns nothing. In order of ease:
+1. **Use the baked-in password you already know** — a non-sysprepped instance keeps the *source* instance's Administrator password. RDP as `Administrator` with the password that was set on the instance the AMI was imaged from (skip "Get password" entirely).
+2. **Reset via SSM** — Systems Manager → Automation → run **`AWSSupport-ResetAccess`** against the instance. Resets the local Administrator password and lets you retrieve a fresh one. Requires the SSM agent (ships with Win Server 2025) + an instance IAM role with SSM permissions.
+3. **Last resorts** — EC2 Serial Console (enable + reset), or stop the instance, detach the root volume, attach it to a second Windows instance, and reset the password offline.
 
 | Component | Location | Notes |
 |---|---|---|
