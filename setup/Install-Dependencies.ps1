@@ -173,6 +173,21 @@ function Find-Ffmpeg {
     return $null
 }
 
+function Find-WingetFfmpeg {
+    # winget installs Gyan.FFmpeg under the WinGet Packages tree but only updates
+    # PATH for NEW shells, so Find-Ffmpeg's Get-Command/known-paths miss it in the
+    # same session. Locate the winget-installed ffmpeg.exe directly so we can copy
+    # it to the pipeline's auto-discover path ($FfmpegDir\bin).
+    $roots = @("$env:LOCALAPPDATA\Microsoft\WinGet\Packages",
+               "$env:ProgramData\Microsoft\WinGet\Packages") | Where-Object { $_ -and (Test-Path $_) }
+    foreach ($r in $roots) {
+        $hit = Get-ChildItem $r -Recurse -File -Filter 'ffmpeg.exe' -ErrorAction SilentlyContinue |
+               Where-Object { $_.FullName -match 'Gyan\.FFmpeg' } | Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+    }
+    return $null
+}
+
 function Find-Fiji {
     # Locate an existing Fiji so an install in a non-default spot is reused rather
     # than duplicated. Handles BOTH the current (Fiji\fiji-windows-x64.exe) and
@@ -218,11 +233,24 @@ function Invoke-Native {
 
 function Download-File($url, $dest) {
     Log "  download: $url"
-    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
-    if (-not (Test-Path $dest) -or (Get-Item $dest).Length -le 0) {
-        throw "download produced no file: $url"
+    # Retry on transient failures (e.g. gyan.dev 503s, connection resets) with a
+    # short backoff, so a blip doesn't abort the whole provisioning run.
+    $max = 3
+    for ($i = 1; $i -le $max; $i++) {
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+            if (-not (Test-Path $dest) -or (Get-Item $dest).Length -le 0) { throw "download produced no file" }
+            Log ("  saved: {0} ({1:N1} MB)" -f $dest, ((Get-Item $dest).Length / 1MB))
+            return
+        } catch {
+            if ($i -lt $max) {
+                Warn ("  download attempt {0}/{1} failed ({2}); retrying in {3}s..." -f $i, $max, $_.Exception.Message, (5 * $i))
+                Start-Sleep -Seconds (5 * $i)
+            } else {
+                throw "download failed after $max attempts: $url ($($_.Exception.Message))"
+            }
+        }
     }
-    Log ("  saved: {0} ({1:N1} MB)" -f $dest, ((Get-Item $dest).Length / 1MB))
 }
 
 # -------------------------------------------------------------------
@@ -395,7 +423,26 @@ if (-not $SkipFfmpeg) {
             if ($winget) {
                 Log "  installing ffmpeg via winget (Gyan.FFmpeg)..."
                 Invoke-Native 'winget' @('install','--id','Gyan.FFmpeg','--source','winget','--accept-package-agreements','--accept-source-agreements','--silent','--disable-interactivity') | Out-Null
+                # winget only updates PATH for NEW shells; refresh this process's PATH
+                # from the registry so the in-session Find-Ffmpeg/Get-Command can see it.
+                $env:Path = ([Environment]::GetEnvironmentVariable('Path','Machine'), [Environment]::GetEnvironmentVariable('Path','User') | Where-Object { $_ }) -join ';'
                 $existingFfmpeg = Find-Ffmpeg
+                if (-not $existingFfmpeg) {
+                    # winget installed it under its Packages tree but not where the
+                    # pipeline looks (and PATH refresh didn't surface it). Copy the
+                    # winget bin\ to $FfmpegDir\bin so Run-Pipeline auto-discovers it
+                    # regardless of PATH -- this is the robust canonical location.
+                    $wf = Find-WingetFfmpeg
+                    if ($wf) {
+                        $dstBin = Join-Path $FfmpegDir 'bin'
+                        New-Item -ItemType Directory -Path $dstBin -Force | Out-Null
+                        Copy-Item (Join-Path (Split-Path $wf -Parent) '*') $dstBin -Force -Recurse -ErrorAction SilentlyContinue
+                        if (Test-Path (Join-Path $dstBin 'ffmpeg.exe')) {
+                            $existingFfmpeg = Join-Path $dstBin 'ffmpeg.exe'
+                            Log "  copied winget ffmpeg + ffprobe -> $existingFfmpeg (pipeline auto-discover path)"
+                        }
+                    }
+                }
             }
             if (-not $existingFfmpeg) {
                 if ($winget) { Warn "  winget didn't produce a working ffmpeg; falling back to the static build." }
