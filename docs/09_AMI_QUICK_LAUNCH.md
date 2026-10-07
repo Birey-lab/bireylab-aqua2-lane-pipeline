@@ -42,9 +42,23 @@ The AMI `Windows2025-AQuA2-Pipeline-v3` (`ami-03473aa6f1cc13fbc`, **us-east-1**,
 #### Locked out of a custom AMI (no retrievable password)
 
 If a custom AMI wasn't sysprepped, "Get Windows Password" returns nothing. In order of ease:
-1. **Use the baked-in password you already know** — a non-sysprepped instance keeps the *source* instance's Administrator password. RDP as `Administrator` with the password that was set on the instance the AMI was imaged from (skip "Get password" entirely).
-2. **Reset via SSM** — Systems Manager → Automation → run **`AWSSupport-ResetAccess`** against the instance. Resets the local Administrator password and lets you retrieve a fresh one. Requires the SSM agent (ships with Win Server 2025) + an instance IAM role with SSM permissions.
-3. **Last resorts** — EC2 Serial Console (enable + reset), or stop the instance, detach the root volume, attach it to a second Windows instance, and reset the password offline.
+
+1. **Reset the password via EC2 user data** (self-service; needs neither the old password nor SSM — *this is the one that worked on the v4 AMI*). Stop the instance → **Actions → Instance settings → Edit user data** → paste an EC2Launch task that resets the local Administrator password on boot, then start the instance and RDP in with the new password:
+   ```yaml
+   version: 1.0
+   tasks:
+     - task: executeScript
+       inputs:
+         - frequency: always
+           type: powershell
+           runAs: localSystem
+           content: |-
+             net user Administrator "<new-password>"
+   ```
+   > **After you're in, clear this user data.** `frequency: always` re-runs the script on *every* boot, so it will **re-apply this password on each reboot** (silently undoing any later password change). It also stores the password in **plaintext**, readable by anyone with EC2 describe access. So: confirm RDP works → Stop → Edit user data → remove it (or set `frequency: once`) → and rotate the password since it was exposed in user data.
+2. **Use the baked-in password you already know** — a non-sysprepped instance keeps the *source* instance's Administrator password. RDP as `Administrator` with the password that was set on the instance the AMI was imaged from (skip "Get password" entirely).
+3. **Reset via SSM** — Systems Manager → Automation → run **`AWSSupport-ResetAccess`** against the instance. Resets the local Administrator password and lets you retrieve a fresh one. Requires the SSM agent (ships with Win Server 2025) + an instance IAM role with SSM permissions.
+4. **Last resorts** — EC2 Serial Console (enable + reset), or stop the instance, detach the root volume, attach it to a second Windows instance, and reset the password offline.
 
 | Component | Location | Notes |
 |---|---|---|
